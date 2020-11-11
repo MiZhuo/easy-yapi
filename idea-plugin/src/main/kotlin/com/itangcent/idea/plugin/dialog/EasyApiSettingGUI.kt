@@ -13,13 +13,13 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.WindowManager
 import com.intellij.ui.CheckBoxList
-import com.itangcent.common.utils.GsonUtils
-import com.itangcent.common.utils.SystemUtils
-import com.itangcent.common.utils.truncate
+import com.itangcent.common.utils.*
 import com.itangcent.idea.icons.EasyIcons
 import com.itangcent.idea.icons.iconOnly
-import com.itangcent.idea.plugin.config.RecommendConfigReader
+import com.itangcent.idea.plugin.config.RecommendConfigLoader
+import com.itangcent.idea.plugin.settings.MarkdownFormatType
 import com.itangcent.idea.plugin.settings.Settings
+import com.itangcent.idea.utils.Charsets
 import com.itangcent.idea.utils.ConfigurableLogger
 import com.itangcent.idea.utils.SwingUtils
 import com.itangcent.intellij.extend.rx.AutoComputer
@@ -29,8 +29,6 @@ import com.itangcent.intellij.logger.Logger
 import com.itangcent.suv.http.ConfigurableHttpClientProvider
 import org.apache.commons.io.FileUtils
 import java.io.File
-import java.nio.charset.Charset
-import java.util.*
 import javax.swing.*
 
 
@@ -44,17 +42,26 @@ class EasyApiSettingGUI {
     private var exportButton: JButton? = null
     //endregion
 
-    //region general-----------------------------------------------------
-    private var pullNewestDataBeforeCheckBox: JCheckBox? = null
+    //region postman
 
     private var postmanTokenTextArea: JTextArea? = null
+
+    private var wrapCollectionCheckBox: JCheckBox? = null
+
+    private var autoMergeScriptCheckBox: JCheckBox? = null
+
+    //endregion
+
+    //region general-----------------------------------------------------
+
+    private var pullNewestDataBeforeCheckBox: JCheckBox? = null
+
 
     private var generalPanel: JPanel? = null
 
     private var logLevelComboBox: JComboBox<Logger.Level>? = null
 
     private var methodDocEnableCheckBox: JCheckBox? = null
-
     private var globalCacheSizeLabel: JLabel? = null
 
     private var projectCacheSizeLabel: JLabel? = null
@@ -73,6 +80,10 @@ class EasyApiSettingGUI {
 
     private var outputDemoCheckBox: JCheckBox? = null
 
+    private var outputCharsetComboBox: JComboBox<Charsets>? = null
+
+    private var markdownFormatTypeComboBox: JComboBox<String>? = null
+
     private var inferEnableCheckBox: JCheckBox? = null
 
     private var maxDeepTextField: JTextField? = null
@@ -83,9 +94,16 @@ class EasyApiSettingGUI {
 
     private var yapiTokenTextArea: JTextArea? = null
 
+    private var enableUrlTemplatingCheckBox: JCheckBox? = null
+
+    private var switchNoticeCheckBox: JCheckBox? = null
+
+    private var formExpandedCheckBox: JCheckBox? = null
+
     private var recommendedCheckBox: JCheckBox? = null
 
     private var httpTimeOutTextField: JTextField? = null
+
     //endregion general-----------------------------------------------------
 
     //region recommend
@@ -112,13 +130,19 @@ class EasyApiSettingGUI {
         SwingUtils.immersed(this.importButton!!)
 
         //region general-----------------------------------------------------
-        recommendedCheckBox!!.toolTipText = RecommendConfigReader.RECOMMEND_CONFIG_PLAINT
+        recommendedCheckBox!!.toolTipText = RecommendConfigLoader.plaint()
 
         autoComputer.bind(pullNewestDataBeforeCheckBox!!)
                 .mutual(this, "settings.pullNewestDataBefore")
 
         autoComputer.bind(postmanTokenTextArea!!)
                 .mutual(this, "settings.postmanToken")
+
+        autoComputer.bind(wrapCollectionCheckBox!!)
+                .mutual(this, "settings.wrapCollection")
+
+        autoComputer.bind(autoMergeScriptCheckBox!!)
+                .mutual(this, "settings.autoMergeScript")
 
         autoComputer.bind(this.globalCacheSizeLabel!!)
                 .with(this::globalCacheSize)
@@ -149,6 +173,9 @@ class EasyApiSettingGUI {
         autoComputer.bind(readGetterCheckBox!!)
                 .mutual(this, "settings.readGetter")
 
+        autoComputer.bind(formExpandedCheckBox!!)
+                .mutual(this, "settings.formExpanded")
+
         autoComputer.bind(recommendedCheckBox!!)
                 .mutual(this, "settings.useRecommendConfig")
 
@@ -175,6 +202,12 @@ class EasyApiSettingGUI {
         autoComputer.bind(yapiTokenTextArea!!)
                 .mutual(this, "settings.yapiTokens")
 
+        autoComputer.bind(enableUrlTemplatingCheckBox!!)
+                .mutual(this, "settings.enableUrlTemplating")
+
+        autoComputer.bind(switchNoticeCheckBox!!)
+                .mutual(this, "settings.switchNotice")
+
         autoComputer.bind(this.httpTimeOutTextField!!)
                 .with<Int?>(this, "settings.httpTimeOut")
                 .eval { (it ?: ConfigurableHttpClientProvider.defaultHttpTimeOut).toString() }
@@ -196,29 +229,39 @@ class EasyApiSettingGUI {
                 .filter { throttleHelper.acquire("settings.logLevel", 300) }
                 .eval { (it ?: ConfigurableLogger.CoarseLogLevel.LOW).getLevel() }
 
+        outputCharsetComboBox!!.model = DefaultComboBoxModel(Charsets.SUPPORTED_CHARSETS)
+
+        markdownFormatTypeComboBox!!.model = DefaultComboBoxModel(MarkdownFormatType.values().mapToTypedArray { it.name })
+
+        autoComputer.bind<String?>(this, "settings.outputCharset")
+                .with(this.outputCharsetComboBox!!)
+                .filter { throttleHelper.acquire("settings.outputCharset", 300) }
+                .eval { (it ?: Charsets.UTF_8).displayName() }
+
+        autoComputer.bind<String?>(this, "settings.markdownFormatType")
+                .with(this.markdownFormatTypeComboBox!!)
+                .filter { throttleHelper.acquire("settings.markdownFormatType", 300) }
+                .eval { (it ?: MarkdownFormatType.SIMPLE.name) }
+
         autoComputer.bind(this.previewTextArea!!)
                 .with<String>(this, "settings.recommendConfigs")
-                .eval { configs -> RecommendConfigReader.buildRecommendConfig(configs.split(",")) }
+                .eval { configs -> RecommendConfigLoader.buildRecommendConfig(configs) }
 
         //endregion  general-----------------------------------------------------
 
-        bindRecommendConfig()
-
         refresh()
 
+        bindRecommendConfig()
+
         this.recommendConfigList!!.setCheckBoxListListener { index, value ->
-            val code = RecommendConfigReader.RECOMMEND_CONFIG_CODES[index]
-            val configs = settings!!.recommendConfigs.split(",")
+            val code = RecommendConfigLoader[index] ?: return@setCheckBoxListListener
+            val settings = this.settings!!
             if (value) {
-                if (!configs.contains(code)) {
-                    val newConfigs = LinkedList(configs)
-                    newConfigs.add(code)
-                    settings!!.recommendConfigs = newConfigs.joinToString(",")
-                }
+                settings.recommendConfigs = RecommendConfigLoader.addSelectedConfig(settings.recommendConfigs, code)
             } else {
-                settings!!.recommendConfigs = configs.filter { it != code }.joinToString(",")
+                settings.recommendConfigs = RecommendConfigLoader.removeSelectedConfig(settings.recommendConfigs, code)
             }
-            autoComputer.value(this, "settings.recommendConfigs", settings!!.recommendConfigs)
+            autoComputer.value(this, "settings.recommendConfigs", settings.recommendConfigs)
 //            this.previewTextArea!!.text =  RecommendConfigReader.buildRecommendConfig(settings!!.recommendConfigs)
         }
 
@@ -236,10 +279,10 @@ class EasyApiSettingGUI {
         autoComputer.value(this::settings, settings.copy())
 
         this.logLevelComboBox!!.selectedItem = ConfigurableLogger.CoarseLogLevel.toLevel(settings.logLevel)
+        this.outputCharsetComboBox!!.selectedItem = Charsets.forName(settings.outputCharset)
 
-        val configs = settings.recommendConfigs.split(",")
-        RecommendConfigReader.RECOMMEND_CONFIG_CODES.forEach {
-            this.recommendConfigList!!.setItemSelected(it, configs.contains(it))
+        RecommendConfigLoader.selectedCodes(settings.recommendConfigs).forEach {
+            this.recommendConfigList!!.setItemSelected(it, true)
         }
 //        this.recommendConfigList!!.selectedIndices = settings.recommendConfigs.map {
 //            RecommendConfigReader.RECOMMEND_CONFIG_CODES.indexOf(it)
@@ -247,11 +290,11 @@ class EasyApiSettingGUI {
     }
 
     private fun bindRecommendConfig() {
-        recommendConfigList!!.setItems(RecommendConfigReader.RECOMMEND_CONFIG_CODES.toList())
+        recommendConfigList!!.setItems(RecommendConfigLoader.codes().toList())
         {
-            RecommendConfigReader.RECOMMEND_CONFIG_MAP[it]?.truncate(100)
-                    ?.replace("\n", "     ")
-                    ?: ""
+            it.padEnd(30) + "    " +
+                    RecommendConfigLoader[it]?.truncate(100)
+                            ?.replace("\n", "    ")
         }
     }
 
@@ -320,12 +363,12 @@ class EasyApiSettingGUI {
     }
 
     private fun getCurrentProject(): Project? {
-        val wm = WindowManager.getInstance()
         val projects = ProjectManager.getInstance().openProjects
         if (projects.size == 1) {
             return projects[0]
         }
 
+        val wm = WindowManager.getInstance()
         if (generalPanel?.parent != null) {
             for (project in projects) {
                 if (SwingUtilities.isDescendingFrom(generalPanel,
@@ -388,7 +431,7 @@ class EasyApiSettingGUI {
         }
         val fileWrapper = chooser.save(toSelect, "setting.json")
         if (fileWrapper != null) {
-            com.itangcent.intellij.util.FileUtils.forceSave(fileWrapper.file.path, GsonUtils.toJson(settings).toByteArray(Charset.defaultCharset()))
+            com.itangcent.intellij.util.FileUtils.forceSave(fileWrapper.file.path, GsonUtils.toJson(settings).toByteArray(kotlin.text.Charsets.UTF_8))
         }
     }
 
@@ -405,10 +448,12 @@ class EasyApiSettingGUI {
             toSelect = LocalFileSystem.getInstance().refreshAndFindFileByPath(lastLocation)
         }
         val files = chooser.choose(null, toSelect)
-        if (!files.isNullOrEmpty()) {
+        if (files.notNullOrEmpty()) {
             val virtualFile = files[0]
-            val read = com.itangcent.common.utils.FileUtils.read(File(virtualFile.path))
-            setSettings(GsonUtils.fromJson(read, Settings::class))
+            val read = com.itangcent.common.utils.FileUtils.read(File(virtualFile.path), kotlin.text.Charsets.UTF_8)
+            if (read.notNullOrEmpty()) {
+                setSettings(GsonUtils.fromJson(read!!, Settings::class))
+            }
         }
     }
 

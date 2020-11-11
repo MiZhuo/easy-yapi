@@ -1,8 +1,12 @@
 package com.itangcent.common.model
 
+import com.itangcent.common.utils.SimpleExtensible
 import java.io.Serializable
 
-class Header : Extensible(), Serializable {
+/**
+ * Represents an HTTP header field.
+ */
+class Header : SimpleExtensible(), Serializable {
     var name: String? = null
 
     var value: String? = null
@@ -10,6 +14,4 @@ class Header : Extensible(), Serializable {
     var desc: String? = null
 
     var required: Boolean? = null
-
-    var example: String? = null
 }

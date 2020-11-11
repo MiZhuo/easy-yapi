@@ -2,29 +2,28 @@ package com.itangcent.idea.plugin.api.export.postman
 
 import com.google.gson.internal.LazilyParsedNumber
 import com.google.inject.Inject
-import com.itangcent.common.utils.GsonUtils
+import com.itangcent.common.logger.traceError
+import com.itangcent.common.utils.KV
+import com.itangcent.common.utils.asInt
+import com.itangcent.common.utils.notNullOrBlank
+import com.itangcent.common.utils.notNullOrEmpty
+import com.itangcent.http.HttpClient
+import com.itangcent.http.HttpRequest
+import com.itangcent.http.HttpResponse
+import com.itangcent.http.contentType
 import com.itangcent.idea.plugin.api.export.ReservedResponseHandle
-import com.itangcent.idea.plugin.api.export.ReservedResult
 import com.itangcent.idea.plugin.api.export.StringResponseHandler
+import com.itangcent.idea.plugin.api.export.reserved
 import com.itangcent.idea.plugin.settings.SettingBinder
-import com.itangcent.intellij.extend.acquireGreedy
-import com.itangcent.intellij.extend.asHashMap
-import com.itangcent.intellij.extend.asMap
+import com.itangcent.intellij.extend.*
 import com.itangcent.intellij.extend.rx.Throttle
 import com.itangcent.intellij.extend.rx.ThrottleHelper
-import com.itangcent.intellij.extend.toInt
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.suv.http.HttpClientProvider
-import org.apache.commons.lang3.StringUtils
-import org.apache.http.client.methods.HttpDelete
-import org.apache.http.client.methods.HttpGet
-import org.apache.http.client.methods.HttpPost
-import org.apache.http.client.methods.HttpPut
 import org.apache.http.entity.ContentType
-import org.apache.http.entity.StringEntity
-import org.apache.http.impl.client.HttpClients
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.streams.toList
 
 /**
@@ -54,7 +53,7 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
     private val apiThrottle: Throttle = ThrottleHelper().build("postman_api")
 
     override fun hasPrivateToken(): Boolean {
-        return !getPrivateToken().isNullOrEmpty()
+        return getPrivateToken().notNullOrEmpty()
     }
 
     override fun getPrivateToken(): String? {
@@ -67,31 +66,33 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
         settingBinder.save(settings)
     }
 
-    private fun beforeRequest() {
+    open protected fun beforeRequest(request: HttpRequest) {
         apiThrottle.acquireGreedy(LIMIT_PERIOD_PRE_REQUEST)
     }
 
-    private fun onErrorResponse(result: ReservedResult<String>) {
+    private fun onErrorResponse(response: HttpResponse) {
 
-        val returnValue = result.result()
+        val returnValue = response.string()
+        if (returnValue.isNullOrBlank()) {
+            logger!!.error("No Response For:${response.request().url()}")
+            return
+        }
         if (returnValue.contains("AuthenticationError")
                 && returnValue.contains("Invalid API Key")) {
             logger!!.error("Authentication failed!")
             return
         }
-        val returnObj = GsonUtils.parseToJsonTree(returnValue)
-        val errorName = returnObj?.asJsonObject
-                ?.get("error")
-                ?.asJsonObject
-                ?.get("name")
+        val returnObj = returnValue.asJsonElement()
+        val errorName = returnObj
+                .sub("error")
+                .sub("name")
                 ?.asString
         val errorMessage = returnObj?.asJsonObject
-                ?.get("error")
-                ?.asJsonObject
-                ?.get("message")
+                .sub("error")
+                .sub("message")
                 ?.asString
 
-        if (result.status() == 429) {
+        if (response.code() == 429) {
 
             if (errorName == null) {
                 logger!!.error("$errorMessage \n $LIMIT_ERROR_MSG")
@@ -110,37 +111,34 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
         logger!!.error("Error Response:$returnValue")
     }
 
+    open protected fun getHttpClient(): HttpClient {
+        return httpClientProvider!!.getHttpClient()
+    }
+
     /**
      * @return collection id
      */
     override fun createCollection(collection: HashMap<String, Any?>): HashMap<String, Any?>? {
 
-        val httpClient = HttpClients.createDefault()
-
-        val httpPost = HttpPost(COLLECTION)
-
-        val collectionWrap: HashMap<String, Any?> = HashMap()
-        collectionWrap["collection"] = collection
-
-        val requestEntity = StringEntity(GsonUtils.toJson(collectionWrap),
-                ContentType.APPLICATION_JSON)
-
-        httpPost.setHeader("x-api-key", getPrivateToken())
-        httpPost.entity = requestEntity
+        val request = getHttpClient()
+                .post(COLLECTION)
+                .contentType(ContentType.APPLICATION_JSON)
+                .header("x-api-key", getPrivateToken())
+                .body(KV.by("collection", collection))
 
         try {
-            beforeRequest()
-            val result = httpClient.execute(httpPost, reservedResponseHandle())
-            val returnValue = result.result()
-            if (StringUtils.isNotBlank(returnValue) && returnValue.contains("collection")) {
-                val returnObj = GsonUtils.parseToJsonTree(returnValue)
-                val collectionInfo = returnObj?.asJsonObject?.get("collection")?.asMap()
-                if (!collectionInfo.isNullOrEmpty()) {
+            beforeRequest(request)
+            val response = call(request)
+            val returnValue = response.string()
+            if (returnValue.notNullOrEmpty() && returnValue!!.contains("collection")) {
+                val returnObj = returnValue.asJsonElement()
+                val collectionInfo = returnObj.sub("collection")?.asMap()
+                if (collectionInfo.notNullOrEmpty()) {
                     return collectionInfo
                 }
             }
 
-            onErrorResponse(result)
+            onErrorResponse(response)
 
             return null
         } catch (e: Throwable) {
@@ -190,7 +188,8 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
                             val responseCode = response["code"]
                             if (responseCode != null) {
                                 when (responseCode) {
-                                    is Map<*, *> -> (response as MutableMap<String, Any?>)["code"] = responseCode["value"].toInt() ?: 200
+                                    is Map<*, *> -> (response as MutableMap<String, Any?>)["code"] =
+                                            responseCode["value"].asInt() ?: 200
                                     is LazilyParsedNumber -> (response as MutableMap<String, Any?>)["code"] = responseCode.toInt()
                                     is String -> (response as MutableMap<String, Any?>)["code"] = responseCode.toInt()
                                 }
@@ -203,31 +202,28 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
 
     private fun doUpdateCollection(collectionId: String, apiInfo: HashMap<String, Any?>): Boolean {
 
-        val httpPut = HttpPut("$COLLECTION/$collectionId")
-        val collection: HashMap<String, Any?> = HashMap()
-        collection["collection"] = apiInfo
-
-        val requestEntity = StringEntity(GsonUtils.toJson(collection),
-                ContentType.APPLICATION_JSON)
-
-        httpPut.setHeader("x-api-key", getPrivateToken())
-        httpPut.entity = requestEntity
+        val request = getHttpClient().put("$COLLECTION/$collectionId")
+                .contentType(ContentType.APPLICATION_JSON)
+                .header("x-api-key", getPrivateToken())
+                .body(KV.by("collection", apiInfo))
 
         try {
-            beforeRequest()
+            beforeRequest(request)
 
-            val result = httpClientProvider!!.getHttpClient().execute(httpPut, reservedResponseHandle())
-            val returnValue = result.result()
-            if (StringUtils.isNotBlank(returnValue) && returnValue.contains("collection")) {
-                val returnObj = GsonUtils.parseToJsonTree(returnValue)
-                val collectionName = returnObj?.asJsonObject?.get("collection")
-                        ?.asJsonObject?.get("name")?.asString
-                if (StringUtils.isNotBlank(collectionName)) {
+            val response = call(request)
+            val returnValue = response.string()
+            if (returnValue.notNullOrEmpty() && returnValue!!.contains("collection")) {
+                val returnObj = returnValue.asJsonElement()
+                val collectionName = returnObj
+                        .sub("collection")
+                        .sub("name")
+                        ?.asString
+                if (collectionName.notNullOrBlank()) {
                     return true
                 }
             }
 
-            onErrorResponse(result)
+            onErrorResponse(response)
             return false
         } catch (e: Throwable) {
             logger!!.traceError("Post failed", e)
@@ -237,23 +233,23 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
     }
 
     override fun getAllCollection(): ArrayList<HashMap<String, Any?>>? {
-        val httpGet = HttpGet(COLLECTION)
-        httpGet.setHeader("x-api-key", getPrivateToken())
+        val request = getHttpClient().get(COLLECTION)
+                .header("x-api-key", getPrivateToken())
 
         try {
-            beforeRequest()
-            val result = httpClientProvider!!.getHttpClient().execute(httpGet, reservedResponseHandle())
-            val returnValue = result.result()
-            if (StringUtils.isNotBlank(returnValue) && returnValue.contains("collections")) {
-                val returnObj = GsonUtils.parseToJsonTree(returnValue)
-                val collections = returnObj?.asJsonObject?.get("collections")
+            beforeRequest(request)
+            val response = call(request)
+            val returnValue = response.string()
+            if (returnValue.notNullOrEmpty() && returnValue!!.contains("collections")) {
+                val returnObj = returnValue.asJsonElement()
+                val collections = returnObj.sub("collections")
                         ?.asJsonArray ?: return null
                 val collectionList: ArrayList<HashMap<String, Any?>> = ArrayList()
                 collections.forEach { collectionList.add(it.asMap()) }
                 return collectionList
             }
 
-            onErrorResponse(result)
+            onErrorResponse(response)
 
             return null
         } catch (e: Throwable) {
@@ -264,20 +260,21 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
     }
 
     override fun getCollectionInfo(collectionId: String): HashMap<String, Any?>? {
-        val httpGet = HttpGet("$COLLECTION/$collectionId")
-        httpGet.setHeader("x-api-key", getPrivateToken())
+        val request = getHttpClient().get("$COLLECTION/$collectionId")
+                .header("x-api-key", getPrivateToken())
         try {
-            beforeRequest()
-            val result = httpClientProvider!!.getHttpClient().execute(httpGet, reservedResponseHandle())
-            val returnValue = result.result()
+            beforeRequest(request)
+            val response = call(request)
+            val returnValue = response.string()
 
-            if (StringUtils.isNotBlank(returnValue) && returnValue.contains("collection")) {
-                val returnObj = GsonUtils.parseToJsonTree(returnValue)
-                return returnObj?.asJsonObject?.get("collection")
+            if (returnValue.notNullOrEmpty() && returnValue!!.contains("collection")) {
+                val returnObj = returnValue.asJsonElement()
+                return returnObj
+                        .sub("collection")
                         ?.asMap()
             }
 
-            onErrorResponse(result)
+            onErrorResponse(response)
 
             return null
         } catch (e: Throwable) {
@@ -288,16 +285,17 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
     }
 
     override fun deleteCollectionInfo(collectionId: String): HashMap<String, Any?>? {
-        val httpDelete = HttpDelete("$COLLECTION/$collectionId")
-        httpDelete.setHeader("x-api-key", getPrivateToken())
+        val request = getHttpClient().delete("$COLLECTION/$collectionId")
+                .header("x-api-key", getPrivateToken())
         try {
-            beforeRequest()
-            val result = httpClientProvider!!.getHttpClient().execute(httpDelete, reservedResponseHandle())
-            val returnValue = result.result()
+            beforeRequest(request)
+            val result = call(request)
+            val returnValue = result.string()
 
-            if (StringUtils.isNotBlank(returnValue) && returnValue.contains("collection")) {
-                val returnObj = GsonUtils.parseToJsonTree(returnValue)
-                return returnObj?.asJsonObject?.get("collection")
+            if (returnValue.notNullOrEmpty() && returnValue!!.contains("collection")) {
+                val returnObj = returnValue.asJsonElement()
+                return returnObj
+                        .sub("collection")
                         ?.asMap()
             }
 
@@ -310,15 +308,36 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
         }
     }
 
-    private fun reservedResponseHandle(): ReservedResponseHandle<String> {
-        return responseHandler
+    private val semaphore = Semaphore(3)
+
+    private val cnt = AtomicInteger(0)
+
+    protected fun call(request: HttpRequest): HttpResponse {
+        return try {
+            if (cnt.incrementAndGet() > 2) {
+                semaphore.acquire()
+                try {
+                    request.call()
+                } finally {
+                    semaphore.release()
+                }
+            } else {
+                request.call()
+            }
+        } finally {
+            cnt.decrementAndGet()
+        }
+    }
+
+    protected fun reservedResponseHandle(): ReservedResponseHandle<String> {
+        return StringResponseHandler.DEFAULT_RESPONSE_HANDLER.reserved()
     }
 
     companion object {
         const val POSTMANHOST = "https://api.getpostman.com"
         val IMPOREDAPI = "$POSTMANHOST/import/exported"
         const val COLLECTION = "$POSTMANHOST/collections"
-        private val DEFAULT_RESPONSE_HANDLER = StringResponseHandler()
+
         //the postman rate limit is 60 per/s
         //Just to be on the safe side,limit to 30 per/s
         private val LIMIT_PERIOD_PRE_REQUEST = TimeUnit.MINUTES.toMillis(1) / 30
@@ -327,8 +346,6 @@ open class DefaultPostmanApiHelper : PostmanApiHelper {
                 "Access to the API using a key is limited to 60 requests per minute.\n" +
                 "And for free,The requests made to the Postman API was limited 1000.\n" +
                 "You can see usage overview at:https://web.postman.co/usage"
-
-        private val responseHandler = ReservedResponseHandle(StringResponseHandler())
     }
 
 }

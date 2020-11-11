@@ -4,19 +4,21 @@ import com.google.inject.Inject
 import com.google.inject.Singleton
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.Request
 import com.itangcent.common.utils.GsonUtils
+import com.itangcent.common.utils.getAs
+import com.itangcent.common.utils.notNullOrBlank
+import com.itangcent.common.utils.notNullOrEmpty
 import com.itangcent.idea.plugin.Worker
 import com.itangcent.idea.plugin.api.export.ClassExporter
-import com.itangcent.idea.plugin.api.export.RequestHelper
 import com.itangcent.idea.plugin.api.export.requestOnly
 import com.itangcent.idea.utils.FileSaveHelper
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.intellij.psi.SelectedHelper
 import com.itangcent.intellij.util.ActionUtils
-import org.apache.commons.lang3.StringUtils
+import com.itangcent.intellij.util.FileType
 import java.util.*
 import kotlin.collections.ArrayList
 
@@ -35,9 +37,6 @@ class PostmanApiExporter {
 
     @Inject
     private val classExporter: ClassExporter? = null
-
-    @Inject
-    private val requestHelper: RequestHelper? = null
 
     @Inject
     private val fileSaveHelper: FileSaveHelper? = null
@@ -69,7 +68,7 @@ class PostmanApiExporter {
                         }
                     }
                 }
-                .fileFilter { file -> file.name.endsWith(".java") }
+                .fileFilter { file -> FileType.acceptable(file.name) }
                 .classHandle {
                     classExporter!!.export(it, requestOnly { request -> requests.add(request) })
                 }
@@ -90,9 +89,9 @@ class PostmanApiExporter {
                                     logger.info("PrivateToken of postman be found")
                                     val createdCollection = postmanApiHelper.createCollection(postman)
 
-                                    if (!createdCollection.isNullOrEmpty()) {
-                                        val collectionName = createdCollection.get("name")?.toString()
-                                        if (StringUtils.isNotBlank(collectionName)) {
+                                    if (createdCollection.notNullOrEmpty()) {
+                                        val collectionName = createdCollection!!.getAs<String>("name")
+                                        if (collectionName.notNullOrBlank()) {
                                             logger.info("Imported as collection:$collectionName")
                                             return@runAsync
                                         }
@@ -112,7 +111,7 @@ class PostmanApiExporter {
                                 fileSaveHelper!!.saveOrCopy(GsonUtils.prettyJson(postman), {
                                     logger.info("Exported data are copied to clipboard,you can paste to postman now")
                                 }, {
-                                    logger.info("Apis save success")
+                                    logger.info("Apis save success: $it")
                                 }) {
                                     logger.info("Apis save failed")
                                 }

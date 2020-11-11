@@ -18,25 +18,15 @@ fun <E> List<E>.asArrayList(): ArrayList<E> {
     return list
 }
 
-fun Any?.toInt(): Int? {
+fun Any?.toPrettyString(): String? {
     if (this == null) return null
-    if (this is Boolean) {
-        return when {
-            this -> 1
-            else -> 0
-        }
-    }
-    if (this is Number) return this.toInt()
-    if (this is String) return this.toIntOrNull()
-    return null
-}
-
-fun Any?.toBoolean(): Boolean? {
-    if (this == null) return null
-    if (this is Boolean) return this
-    if (this is Number) return this.toInt() == 1
-    if (this is String) return this == "true"
-    return null
+    if (this is String) return this
+    if (this is Array<*>) return "[" + this.joinToString(separator = ", ") { it.toPrettyString() ?: "null" } + "]"
+    if (this is Collection<*>) return "[" + this.joinToString(separator = ", ") { it.toPrettyString() ?: "null" } + "]"
+    if (this is Map<*, *>) return "{" + this.entries.joinToString(separator = ", ") {
+        (it.key.toPrettyString() ?: "null") + ": " + (it.value.toPrettyString() ?: "null")
+    } + "}"
+    return this.toString()
 }
 
 @Suppress("UNCHECKED_CAST")

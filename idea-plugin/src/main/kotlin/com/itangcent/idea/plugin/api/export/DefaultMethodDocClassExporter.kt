@@ -1,24 +1,25 @@
 package com.itangcent.idea.plugin.api.export
 
 import com.google.inject.Inject
-import com.intellij.lang.jvm.JvmModifier
 import com.intellij.psi.*
-import com.intellij.util.containers.isNullOrEmpty
 import com.itangcent.common.exception.ProcessCanceledException
+import com.itangcent.common.kit.KVUtils
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.MethodDoc
 import com.itangcent.common.utils.KV
-import com.itangcent.common.utils.KVUtils
+import com.itangcent.common.utils.notNullOrBlank
+import com.itangcent.common.utils.notNullOrEmpty
 import com.itangcent.idea.plugin.StatusRecorder
 import com.itangcent.idea.plugin.Worker
 import com.itangcent.idea.plugin.WorkerStatus
 import com.itangcent.idea.plugin.api.MethodInferHelper
 import com.itangcent.idea.plugin.settings.SettingBinder
+import com.itangcent.idea.plugin.settings.group.JsonSetting
 import com.itangcent.idea.psi.PsiMethodResource
 import com.itangcent.intellij.config.rule.RuleComputer
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.jvm.*
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.intellij.psi.JsonOption
 import com.itangcent.intellij.psi.PsiClassUtils
 import org.apache.commons.lang3.StringUtils
@@ -64,13 +65,13 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
     protected val psiClassHelper: PsiClassHelper? = null
 
     @Inject
-    protected val docParseHelper: DocParseHelper? = null
-
-    @Inject
     protected val methodDocHelper: MethodDocHelper? = null
 
     @Inject
     protected val settingBinder: SettingBinder? = null
+
+    @Inject
+    protected val jsonSetting: JsonSetting? = null
 
     @Inject
     protected val duckTypeHelper: DuckTypeHelper? = null
@@ -127,21 +128,21 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
     }
 
     @Suppress("UNUSED")
-    protected fun processClass(cls: PsiClass, kv: KV<String, Any?>) {
+    protected open fun processClass(cls: PsiClass, kv: KV<String, Any?>) {
     }
 
     @Suppress("UNUSED")
-    protected fun hasApi(psiClass: PsiClass): Boolean {
+    protected open fun hasApi(psiClass: PsiClass): Boolean {
         return true
     }
 
     @Suppress("UNUSED")
-    protected fun isApi(psiMethod: PsiMethod): Boolean {
+    protected open fun isApi(psiMethod: PsiMethod): Boolean {
         return true
     }
 
     @Suppress("UNUSED")
-    open protected fun shouldIgnore(psiElement: PsiElement): Boolean {
+    protected open fun shouldIgnore(psiElement: PsiElement): Boolean {
         if (ruleComputer!!.computer(ClassExportRuleKeys.IGNORE, psiElement) == true) {
             return true
         }
@@ -204,7 +205,7 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
 
                 val descOfReturn = docHelper!!.findDocByTag(method, "return")
 
-                if (!descOfReturn.isNullOrBlank()) {
+                if (descOfReturn.notNullOrBlank()) {
                     val methodReturnMain = ruleComputer!!.computer(ClassExportRuleKeys.METHOD_RETURN_MAIN, method)
                     if (methodReturnMain.isNullOrBlank()) {
                         methodDocHelper.appendRetDesc(methodDoc, descOfReturn)
@@ -212,12 +213,18 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                         val options: ArrayList<HashMap<String, Any?>> = ArrayList()
                         val comment = linkExtractor!!.extract(descOfReturn, method, object : AbstractLinkResolve() {
 
-                            override fun linkToPsiElement(plainText: String, linkTo: PsiElement?): String? {
+                            override fun linkToPsiElement(plainText: String, linkTo: Any?): String? {
 
                                 psiClassHelper!!.resolveEnumOrStatic(plainText, method, "")
                                         ?.let { options.addAll(it) }
 
                                 return super.linkToPsiElement(plainText, linkTo)
+                            }
+
+                            override fun linkToType(plainText: String, linkType: PsiType): String? {
+                                return jvmClassHelper!!.resolveClassInType(linkType)?.let {
+                                    linkResolver!!.linkToClass(it)
+                                }
                             }
 
                             override fun linkToClass(plainText: String, linkClass: PsiClass): String? {
@@ -237,12 +244,12 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                             }
                         })
 
-                        if (!comment.isNullOrBlank()) {
-                            if (!KVUtils.addKeyComment(typedResponse, methodReturnMain, comment)) {
+                        if (comment.notNullOrBlank()) {
+                            if (!KVUtils.addKeyComment(typedResponse, methodReturnMain, comment!!)) {
                                 methodDocHelper.appendRetDesc(methodDoc, comment)
                             }
                         }
-                        if (!options.isNullOrEmpty()) {
+                        if (options.notNullOrEmpty()) {
                             if (!KVUtils.addKeyOptions(typedResponse, methodReturnMain, options)) {
                                 methodDocHelper.appendRetDesc(methodDoc, KVUtils.getOptionDesc(options))
                             }
@@ -269,7 +276,7 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                 paramDocTag.dataElements
                         .asSequence()
                         .map { it?.text }
-                        .filterNot { StringUtils.isBlank(it) }
+                        .filterNot { it.isNullOrBlank() }
                         .forEach {
                             when {
                                 name == null -> name = it
@@ -283,7 +290,7 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                     val options: ArrayList<HashMap<String, Any?>> = ArrayList()
                     val comment = linkExtractor!!.extract(value, psiMethod, object : AbstractLinkResolve() {
 
-                        override fun linkToPsiElement(plainText: String, linkTo: PsiElement?): String? {
+                        override fun linkToPsiElement(plainText: String, linkTo: Any?): String? {
 
                             psiClassHelper!!.resolveEnumOrStatic(plainText, psiMethod, name!!)
                                     ?.let { options.addAll(it) }
@@ -309,7 +316,7 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                     })
 
                     methodParamComment[name!!] = comment ?: ""
-                    if (!options.isNullOrEmpty()) {
+                    if (options.notNullOrEmpty()) {
                         methodParamComment["$name@options"] = options
                     }
 
@@ -320,9 +327,9 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
     }
 
     private fun foreachMethod(cls: PsiClass, handle: (PsiMethod) -> Unit) {
-        cls.allMethods
-                .filter { !jvmClassHelper!!.isBasicMethod(it.name) }
-                .filter { !it.hasModifier(JvmModifier.STATIC) }
+        jvmClassHelper!!.getAllMethods(cls)
+                .filter { !jvmClassHelper.isBasicMethod(it.name) }
+                .filter { !it.hasModifierProperty("static") }
                 .filter { !it.isConstructor }
                 .filter { !shouldIgnore(it) }
                 .forEach(handle)
@@ -354,7 +361,8 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
             param: PsiParameter,
             paramDesc: String?
     ) {
-        val typeObject = psiClassHelper!!.getTypeObject(param.type, method, JsonOption.READ_COMMENT)
+        val typeObject = psiClassHelper!!.getTypeObject(param.type, method,
+                jsonSetting!!.jsonOption(JsonOption.READ_COMMENT))
         methodDocHelper!!.addParam(methodDoc, param.name!!, typeObject, paramDesc)
     }
 
@@ -372,17 +380,13 @@ open class DefaultMethodDocClassExporter : ClassExporter, Worker {
                 methodInferHelper.inferReturn(method)
 //                actionContext!!.callWithTimeout(20000) { methodReturnInferHelper.inferReturn(method) }
             }
-            readGetter() -> psiClassHelper!!.getTypeObject(psiType, method, JsonOption.ALL)
-            else -> psiClassHelper!!.getTypeObject(psiType, method, JsonOption.READ_COMMENT)
+            else -> psiClassHelper!!.getTypeObject(psiType, method,
+                    jsonSetting!!.jsonOption(JsonOption.READ_COMMENT))
         }
     }
 
     private fun methodDocEnable(): Boolean {
         return settingBinder!!.read().methodDocEnable
-    }
-
-    private fun readGetter(): Boolean {
-        return settingBinder!!.read().readGetter
     }
 
     private fun needInfer(): Boolean {

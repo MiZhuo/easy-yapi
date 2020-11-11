@@ -4,10 +4,12 @@ buildscript {
     repositories {
         mavenCentral()
     }
+
     dependencies {
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
     }
 }
+
 plugins {
     //https://mvnrepository.com/artifact/org.jetbrains.kotlin.jvm/org.jetbrains.kotlin.jvm.gradle.plugin
     id 'org.jetbrains.kotlin.jvm' version '1.3.50'
@@ -33,8 +35,12 @@ intellij {
     updateSinceUntilBuild false
     sameSinceUntilBuild false
 
-    plugins 'org.jetbrains.kotlin:1.3.11-release-IJ2017.3-1'
-//    plugins 'org.jetbrains.kotlin:1.3.21-release-IJ2018.2-1' //dependency kotlin
+    plugins "org.jetbrains.kotlin:1.3.11-release-IJ2017.3-1"
+    //plugins "org.jetbrains.kotlin:1.3.11-release-IJ2017.3-1", "org.intellij.scala:2017.3.11"
+    //plugins 'org.jetbrains.kotlin:1.3.21-release-IJ2018.2-1' //dependency kotlin
+
+
+//    plugins = ['java']
 }
 
 task javadocJar(type: Jar, dependsOn: javadoc) {
@@ -96,12 +102,20 @@ dependencies {
 //    compile fileTree(dir: 'libs', include: ['*.jar'])
 
 
-    compile('com.itangcent:intellij-idea:0.1.8-SNAPSHOT') {
+    compile('com.itangcent:intellij-idea:0.8.3-SNAPSHOT') {
         exclude group: 'com.google.inject'
         exclude group: 'com.google.code.gson'
     }
 
-    compile name: 'intellij-kotlin-support'
+    compile('com.itangcent:intellij-kotlin-support:0.8.3-SNAPSHOT') {
+        exclude group: 'com.google.inject'
+        exclude group: 'com.google.code.gson'
+    }
+
+//    compile('com.itangcent:intellij-scala-support:0.8.3-SNAPSHOT') {
+//        exclude group: 'com.google.inject'
+//        exclude group: 'com.google.code.gson'
+//    }
 
     compile("com.google.inject:guice:4.2.2") {
         exclude group: 'org.checkerframework', module: 'checker-compat-qual'
@@ -131,50 +145,60 @@ compileTestKotlin {
 
 
 task findSpi {
-    def names = [] as Set<String>
-    def duplicated = [] as Set<String>
-    //find duplicated files
-    configurations.compile.forEach {
-        if (it.isFile()) {
-            zipTree(it)
-                    .filter { it.parentFile.path.endsWith("META-INF/services") }
-                    .forEach {
-//                println("file:" + it.name)
-                if (!names.add(it.name)) {
-                    if (!duplicated.contains(it.name)) {
-                        duplicated.add(it.name)
-                    }
-                }
+    try {
+        def names = [] as Set<String>
+        def duplicated = [] as Set<String>
+        //find duplicated files
+        configurations.compile.forEach {
+            if (it.isFile()) {
+                zipTree(it)
+                        .filter { it.parentFile.path.endsWith("META-INF/services") }
+                        .forEach {
+                            if (!names.add(it.name)) {
+                                if (!duplicated.contains(it.name)) {
+                                    duplicated.add(it.name)
+                                }
+                            }
+                        }
             }
         }
-    }
 
-    def servicesDir = new File("./src/main/resources/META-INF/services/")
-    servicesDir.deleteOnExit()
-    servicesDir.mkdirs()
+        def servicesDir = new File("./src/main/resources/META-INF/services/")
+        servicesDir.delete()
+        servicesDir.mkdirs()
 
-    duplicated.forEach {
-        try {
-            def targetFile = new File(servicesDir, it)
-            targetFile.createNewFile()
-            targetFile.text = ""
-        } catch (e) {
-            println("error:" + e)
-        }
-    }
-
-    configurations.compile.forEach {
-        if (it.isFile()) {
-            zipTree(it)
-                    .filter {
-                it.parentFile.path.endsWith("META-INF/services") &&
-                        duplicated.contains(it.name)
-            }
-            .forEach {
-                def targetFile = new File(servicesDir, it.name)
-                targetFile.append(it.text)
-                targetFile.append("\n")
+        duplicated.forEach {
+            try {
+                def targetFile = new File(servicesDir, it)
+                targetFile.createNewFile()
+                targetFile.text = ""
+            } catch (e) {
+                println("error:" + e)
             }
         }
+
+        configurations.compile.forEach {
+            if (it.isFile()) {
+                zipTree(it)
+                        .filter {
+                            it.parentFile.path.endsWith("META-INF/services") &&
+                                    duplicated.contains(it.name)
+                        }
+                        .forEach {
+                            try {
+                                def targetFile = new File(servicesDir, it.name)
+                                if (!targetFile.exists()) {
+                                    targetFile.createNewFile()
+                                }
+                                targetFile.append(it.text)
+                                targetFile.append("\n")
+                            } catch (e) {
+                                println("error to append services info to:" + it.name + e)
+                            }
+                        }
+            }
+        }
+    } catch (e) {
+        println("error to find spi:" + e)
     }
 }

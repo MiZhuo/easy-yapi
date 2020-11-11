@@ -10,9 +10,11 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.psi.*
 import com.itangcent.common.concurrent.AQSCountLatch
 import com.itangcent.common.concurrent.CountLatch
+import com.itangcent.common.kit.KitUtils
 import com.itangcent.common.model.Doc
 import com.itangcent.common.model.MethodDoc
 import com.itangcent.common.model.Request
+import com.itangcent.common.utils.safeComputeIfAbsent
 import com.itangcent.idea.icons.EasyIcons
 import com.itangcent.idea.plugin.api.export.ClassExporter
 import com.itangcent.idea.plugin.api.export.yapi.YapiApiDashBoardExporter
@@ -30,6 +32,7 @@ import com.itangcent.intellij.extend.asMap
 import com.itangcent.intellij.extend.guice.PostConstruct
 import com.itangcent.intellij.extend.rx.AutoComputer
 import com.itangcent.intellij.extend.rx.from
+import com.itangcent.intellij.extend.sub
 import com.itangcent.intellij.logger.Logger
 import com.itangcent.intellij.psi.PsiClassUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
@@ -249,7 +252,10 @@ class YapiDashboardDialog : JDialog() {
                         for (moduleNode in moduleNodes) {
                             if (disposed) break
                             loadApiInModule(moduleNode, rootTreeModel)
-                            rootTreeModel.reload(moduleNode)
+                            KitUtils.safe(ArrayIndexOutOfBoundsException::class,
+                                    NullPointerException::class) {
+                                rootTreeModel.reload(moduleNode)
+                            }
                         }
                         apiLoadFuture = null
                     }
@@ -314,13 +320,13 @@ class YapiDashboardDialog : JDialog() {
                                 anyFound = true
                                 val resourceClass = resourceHelper!!.findResourceClass(doc.resource!!)
 
-                                val clsTreeNode = classNodeMap.computeIfAbsent(resourceClass!!) {
+                                val clsTreeNode = classNodeMap.safeComputeIfAbsent(resourceClass!!) {
                                     val classProjectNodeData = ClassProjectNodeData(this, resourceClass, resourceHelper.findAttrOfClass(resourceClass))
                                     val node = DefaultMutableTreeNode(classProjectNodeData)
                                     moduleNode.add(node)
                                     (moduleNode.userObject as ModuleProjectNodeData).addSubProjectNodeData(classProjectNodeData)
-                                    return@computeIfAbsent node
-                                }
+                                    return@safeComputeIfAbsent node
+                                }!!
 
                                 val apiProjectNodeData = ApiProjectNodeData(this, doc)
 
@@ -343,7 +349,10 @@ class YapiDashboardDialog : JDialog() {
             } else {
                 moduleNode.removeFromParent()
             }
-            rootTreeModel.reload(moduleNode)
+            KitUtils.safe(ArrayIndexOutOfBoundsException::class,
+                    NullPointerException::class) {
+                rootTreeModel.reload(moduleNode)
+            }
         }
     }
 
@@ -511,8 +520,8 @@ class YapiDashboardDialog : JDialog() {
                             return@forEach
                         }
 
-                        val projectInfo = yapiApiHelper.getProjectInfo(token, projectId)?.asJsonObject
-                                ?.get("data")
+                        val projectInfo = yapiApiHelper.getProjectInfo(token, projectId)
+                                .sub("data")
                                 ?.asMap()
 
                         if (projectInfo.isNullOrEmpty()) {
@@ -633,8 +642,7 @@ class YapiDashboardDialog : JDialog() {
                 }
 
                 val projectInfo = yapiApiHelper.getProjectInfo(projectToken, projectId)
-                        ?.asJsonObject
-                        ?.get("data")
+                        .sub("data")
                         ?.asMap()
 
                 if (projectInfo.isNullOrEmpty()) {

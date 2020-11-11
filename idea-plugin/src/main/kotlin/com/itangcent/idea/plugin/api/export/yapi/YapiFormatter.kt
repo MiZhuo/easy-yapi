@@ -1,23 +1,21 @@
 package com.itangcent.idea.plugin.api.export.yapi
 
 import com.google.inject.Inject
+import com.google.inject.Singleton
 import com.intellij.psi.PsiMethod
 import com.itangcent.common.constant.Attrs
-import com.itangcent.common.model.Doc
-import com.itangcent.common.model.MethodDoc
-import com.itangcent.common.model.Param
-import com.itangcent.common.model.Request
-import com.itangcent.common.utils.GsonUtils
-import com.itangcent.common.utils.KV
-import com.itangcent.common.utils.KVUtils
+import com.itangcent.common.kit.KVUtils
+import com.itangcent.common.model.*
+import com.itangcent.common.utils.*
 import com.itangcent.idea.plugin.api.export.ClassExportRuleKeys
+import com.itangcent.idea.plugin.api.export.ResolveMultiPath
+import com.itangcent.idea.plugin.render.MarkdownRender
 import com.itangcent.idea.psi.resource
 import com.itangcent.idea.psi.resourceMethod
 import com.itangcent.intellij.config.ConfigReader
 import com.itangcent.intellij.config.rule.RuleComputer
 import com.itangcent.intellij.config.rule.SimpleRuleParser
 import com.itangcent.intellij.context.ActionContext
-import com.itangcent.intellij.extend.toInt
 import com.itangcent.intellij.jvm.DocHelper
 import com.itangcent.intellij.logger.Logger
 import com.itangcent.intellij.psi.PsiClassUtils
@@ -26,8 +24,11 @@ import java.util.*
 import java.util.regex.Pattern
 import java.util.stream.Collectors
 import kotlin.collections.ArrayList
+import kotlin.collections.LinkedHashMap
 
-class YapiFormatter {
+@Singleton
+open class YapiFormatter {
+
     @Inject
     private val logger: Logger? = null
 
@@ -43,11 +44,14 @@ class YapiFormatter {
     @Inject
     protected val docHelper: DocHelper? = null
 
-    fun doc2Item(doc: Doc): HashMap<String, Any?> {
+    @Inject
+    protected val markdownRender: MarkdownRender? = null
+
+    fun doc2Item(doc: Doc): List<HashMap<String, Any?>> {
         if (doc is Request) {
-            return request2Item(doc)
+            return request2Items(doc)
         } else if (doc is MethodDoc) {
-            return methodDoc2Item(doc)
+            return listOf(methodDoc2Item(doc))
         }
         throw IllegalArgumentException("unknown doc")
     }
@@ -63,7 +67,7 @@ class YapiFormatter {
         item["type"] = "static"
         item["req_body_is_json_schema"] = false
         item["res_body_is_json_schema"] = true
-        item["api_opened"] = false
+        item["api_opened"] = methodDoc.isOpen()
         item["index"] = 0
         item["tag"] = methodDoc.getTags()
 
@@ -120,15 +124,11 @@ class YapiFormatter {
     private fun getPathOfMethodDoc(methodDoc: MethodDoc): String {
         val path = ruleComputer!!.computer(ClassExportRuleKeys.METHOD_DOC_PATH, methodDoc.resource()!!)
 
-        if (!path.isNullOrEmpty()) {
-            return path
+        if (path.notNullOrEmpty()) {
+            return path!!
         }
 
-        return PsiClassUtils.fullNameOfMethod(methodDoc.resourceMethod()!!).let {
-            Regex("[^a-zA-Z0-9-/_:.!]").replace(it, "/")
-        }.let {
-            Regex("//+").replace(it, "/")
-        }
+        return formatPath(PsiClassUtils.fullNameOfMethod(methodDoc.resourceMethod()!!))
     }
 
     private fun getHttpMethodOfMethodDoc(methodDoc: MethodDoc): String {
@@ -161,14 +161,14 @@ class YapiFormatter {
         }
 
         result["properties"] = properties
-        if (!requireds.isNullOrEmpty()) {
-            result["required"] = requireds.toTypedArray()
+        if (requireds.notNullOrEmpty()) {
+            result["required"] = requireds!!.toTypedArray()
         }
 
         return toJson(result, rootDesc)
     }
-    //endregion methodDoc----------------------------------------------------------
 
+    //endregion methodDoc----------------------------------------------------------
 
     private fun toJson(result: HashMap<String, Any?>, rootDesc: String?): String {
         result["\$schema"] = "http://json-schema.org/draft-04/schema#"
@@ -176,6 +176,67 @@ class YapiFormatter {
             result["description"] = rootDesc
         }
         return GsonUtils.toJson(result)
+    }
+
+    fun request2Items(request: Request): List<HashMap<String, Any?>> {
+
+        val item = request2Item(request)
+
+        val pathInRequest = request.path ?: URL.nil()
+        if (pathInRequest.single()) {
+            val path = formatPath(pathInRequest.url() ?: "")
+            val queryPath: HashMap<String, Any?> = item.getAs("query_path")!!
+            queryPath["path"] = path
+            item["path"] = path
+            return listOf(item)
+        }
+
+        val pathMultiResolve = ruleComputer!!.computer(ClassExportRuleKeys.PATH_MULTI, request.resource()!!)?.let {
+            ResolveMultiPath.valueOf(it.toUpperCase())
+        } ?: ResolveMultiPath.FIRST
+
+        if (pathMultiResolve == ResolveMultiPath.ALL) {
+            return pathInRequest.urls().map {
+                val copyItem = copyItem(item)
+                val path = formatPath(it)
+                val queryPath: HashMap<String, Any?> = copyItem.getAs("query_path")!!
+                copyItem["path"] = path
+                queryPath["path"] = path
+                return@map copyItem
+            }
+        } else {
+            val path: String? = when (pathMultiResolve) {
+                ResolveMultiPath.FIRST -> {
+                    pathInRequest.urls().firstOrNull()
+                }
+                ResolveMultiPath.LAST -> {
+                    pathInRequest.urls().lastOrNull()
+                }
+                ResolveMultiPath.LONGEST -> {
+                    pathInRequest.urls().longest()
+                }
+                ResolveMultiPath.SHORTEST -> {
+                    pathInRequest.urls().shortest()
+                }
+                else -> ""
+            }
+
+            val queryPath: HashMap<String, Any?> = item.getAs("query_path")!!
+            queryPath["path"] = path
+            item["path"] = path
+            return listOf(item)
+        }
+
+    }
+
+    protected open fun copyItem(item: HashMap<String, Any?>): HashMap<String, Any?> {
+        val copyItem = KV.create<String, Any?>()
+        copyItem.putAll(item)
+
+        val queryPath = HashMap(item.getAs<HashMap<String, Any?>>("query_path"))
+        copyItem["queryPath"] = queryPath
+
+        return copyItem
     }
 
     fun request2Item(request: Request): HashMap<String, Any?> {
@@ -187,7 +248,7 @@ class YapiFormatter {
         item["type"] = "static"
         item["req_body_is_json_schema"] = false
         item["res_body_is_json_schema"] = true
-        item["api_opened"] = false
+        item["api_opened"] = request.isOpen()
         item["index"] = 0
         item["tag"] = request.getTags()
 
@@ -199,8 +260,8 @@ class YapiFormatter {
         item["query_path"] = queryPath
         queryPath["params"] = EMPTY_PARAMS
 
-        queryPath["path"] = formatPath(request.path)
-        item["path"] = formatPath(request.path)
+//        queryPath["path"] = formatPath(request.path)
+//        item["path"] = formatPath(request.path)
 
         addTimeAttr(item)
         item["__v"] = 0
@@ -214,8 +275,8 @@ class YapiFormatter {
                     .set("name", it.name)
                     .set("value", it.value)
                     .set("desc", it.desc)
-                    .set("example", it.example)
-                    .set("required", it.required.toInt())
+                    .set("example", it.getDemo() ?: it.value)
+                    .set("required", it.required.asInt())
             )
         }
 
@@ -225,8 +286,9 @@ class YapiFormatter {
             queryList.add(KV.create<String, Any?>()
                     .set("name", it.name)
                     .set("value", it.value)
+                    .set("example", it.getDemo() ?: it.value)
                     .set("desc", it.desc)
-                    .set("required", it.required.toInt())
+                    .set("required", it.required.asInt())
             )
         }
 
@@ -237,9 +299,9 @@ class YapiFormatter {
             request.formParams!!.forEach {
                 urlencodeds.add(KV.create<String, Any?>()
                         .set("name", it.name)
-                        .set("value", it.value)
+                        .set("example", it.getDemo() ?: it.value)
                         .set("type", it.type)
-                        .set("required", it.required.toInt())
+                        .set("required", it.required.asInt())
                         .set("desc", it.desc)
                 )
             }
@@ -251,6 +313,7 @@ class YapiFormatter {
             request.paths!!.forEach {
                 pathParmas.add(KV.create<String, Any?>()
                         .set("name", it.name)
+                        .set("example", it.getDemo() ?: it.value)
                         .set("desc", it.desc)
                 )
             }
@@ -262,7 +325,7 @@ class YapiFormatter {
             item["req_body_form"] = EMPTY_ARR
 
             //todo:need desc of body
-            item["req_body_other"] = parseBySchema(request.body, "")
+            item["req_body_other"] = parseBySchema(request.body, request.bodyAttr)
         }
 
         if (!request.response.isNullOrEmpty()) {
@@ -283,13 +346,21 @@ class YapiFormatter {
     }
 
     /**
-     * make sure the path prefix with "/"
+     * Make sure  the path prefix with `/`
+     * Path is only allowed to consist of alphanumeric or `-/_:.{}=`
      */
     private fun formatPath(path: String?): String {
+        if (!autoFormatUrl()) {
+            return path ?: ""
+        }
         return when {
             path.isNullOrEmpty() -> "/"
             path.startsWith("/") -> path
             else -> "/$path"
+        }.let {
+            Regex("[^a-zA-Z0-9-/_:.{}?=!]").replace(it, "/")
+        }.let {
+            Regex("//+").replace(it, "/")
         }
     }
 
@@ -306,7 +377,7 @@ class YapiFormatter {
     @Suppress("UNCHECKED_CAST")
     private fun parseObject(path: String?, typedObject: Any?): HashMap<String, Any?> {
         if (typedObject == null) return nullObject()
-        val item: HashMap<String, Any?> = HashMap()
+        val item: HashMap<String, Any?> = LinkedHashMap()
         if (typedObject is String) {
             item["type"] = "string"
         } else if (typedObject is Number) {
@@ -333,24 +404,21 @@ class YapiFormatter {
             }
         } else if (typedObject is Map<*, *>) {
             item["type"] = "object"
-            val properties: HashMap<String, Any?> = HashMap()
-            var comment: HashMap<String, Any?>? = null
-            try {
-                comment = typedObject[Attrs.COMMENT_ATTR] as HashMap<String, Any?>?
-            } catch (e: Throwable) {
-            }
-            var required: HashMap<String, Any?>? = null
-            try {
-                required = typedObject[Attrs.REQUIRED_ATTR] as HashMap<String, Any?>?
-            } catch (e: Throwable) {
-            }
+            val properties: HashMap<String, Any?> = LinkedHashMap()
+            val comment: HashMap<String, Any?>? = typedObject[Attrs.COMMENT_ATTR] as? HashMap<String, Any?>?
+            val required: HashMap<String, Any?>? = typedObject[Attrs.REQUIRED_ATTR] as? HashMap<String, Any?>?
+            val default: HashMap<String, Any?>? = typedObject[Attrs.DEFAULT_VALUE_ATTR] as? HashMap<String, Any?>?
+
             var requireds: LinkedList<String>? = null
             if (!required.isNullOrEmpty()) {
                 requireds = LinkedList()
             }
+            val mocks: HashMap<String, Any?>? = typedObject[Attrs.MOCK_ATTR] as? HashMap<String, Any?>?
+
             typedObject.forEachValid { k, v ->
                 try {
-                    val propertyInfo = parseObject(contactPath(path, k.toString()), v)
+                    val key = k.toString()
+                    val propertyInfo = parseObject(contactPath(path, key), v)
 
                     if (comment != null) {
                         val desc = comment[k]
@@ -383,16 +451,22 @@ class YapiFormatter {
                         }
                     }
                     if (required?.get(k) == true) {
-                        requireds?.add(k.toString())
+                        requireds?.add(key)
                     }
-                    properties[k.toString()] = propertyInfo
+                    mocks?.get(key)?.let { addMock(propertyInfo, it) }
+
+                    default?.get(k)?.takeUnless { it.anyIsNullOrBlank() }
+                            ?.let { propertyInfo["default"] = it }
+
+
+                    properties[key] = propertyInfo
                 } catch (e: Exception) {
                     logger!!.warn("failed to mock for $path.$k")
                 }
             }
             item["properties"] = properties
-            if (!requireds.isNullOrEmpty()) {
-                item["required"] = requireds.toTypedArray()
+            if (requireds.notNullOrEmpty()) {
+                item["required"] = requireds!!.toTypedArray()
             }
         }
 
@@ -407,6 +481,7 @@ class YapiFormatter {
                 }
             }
         }
+
 
         return item
     }
@@ -449,10 +524,10 @@ class YapiFormatter {
         val existedDesc = item["markdown"]
         if (existedDesc == null) {
             item["markdown"] = desc
-            item["desc"] = "<p>$desc</p>"
+            item["desc"] = markdownRender?.render(desc) ?: "<p>$desc</p>"
         } else {
             item["markdown"] = "$existedDesc\n$desc"
-            item["desc"] = "<p>$existedDesc\n$desc</p>"
+            item["desc"] = markdownRender?.render(desc) ?: "<p>$existedDesc\n$desc</p>"
         }
     }
 
@@ -491,13 +566,13 @@ class YapiFormatter {
     private val regexParseCache: HashMap<String, (String?) -> Boolean> = HashMap()
 
     private fun parseRegexOrConstant(str: String): (String?) -> Boolean {
-        return regexParseCache.computeIfAbsent(str) {
+        return regexParseCache.safeComputeIfAbsent(str) {
             if (str.isBlank()) {
-                return@computeIfAbsent { true }
+                return@safeComputeIfAbsent { true }
             }
             val tinyStr = str.trim()
             if (tinyStr == "*") {
-                return@computeIfAbsent { true }
+                return@safeComputeIfAbsent { true }
             }
 
             if (tinyStr.contains("*")) {
@@ -513,15 +588,15 @@ class YapiFormatter {
                         }$"
                 )
 
-                return@computeIfAbsent {
+                return@safeComputeIfAbsent {
                     pattern.matcher(it).matches()
                 }
             }
 
-            return@computeIfAbsent {
+            return@safeComputeIfAbsent {
                 str == it
             }
-        }
+        }!!
     }
 
     class MockRule(val pathPredict: (String?) -> Boolean,
@@ -530,16 +605,13 @@ class YapiFormatter {
 
     //endregion mock rules---------------------------------------------------------
 
+    protected fun autoFormatUrl(): Boolean {
+        return configReader!!.first("auto.format.url")?.toBool() ?: true
+    }
+
     companion object {
         val EMPTY_ARR: List<String> = Collections.emptyList<String>()!!
         val EMPTY_PARAMS: List<String> = Collections.emptyList<String>()
     }
 
-}
-
-fun Boolean?.toInt(): Int {
-    return when {
-        this != null && this -> 1
-        else -> 0
-    }
 }

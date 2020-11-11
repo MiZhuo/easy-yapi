@@ -1,8 +1,12 @@
 package com.itangcent.common.model
 
+import com.itangcent.common.utils.SimpleExtensible
 import java.io.Serializable
 
-open class Response : Extensible(), Serializable {
+/**
+ * A response of [Request].
+ */
+open class Response : SimpleExtensible(), Serializable {
 
     var headers: MutableList<Header>? = null
 

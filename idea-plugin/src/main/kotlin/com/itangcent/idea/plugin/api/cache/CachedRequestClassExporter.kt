@@ -5,7 +5,9 @@ import com.google.inject.name.Named
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiElement
 import com.itangcent.common.exception.ProcessCanceledException
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.Request
+import com.itangcent.common.utils.notNullOrEmpty
 import com.itangcent.idea.plugin.StatusRecorder
 import com.itangcent.idea.plugin.Worker
 import com.itangcent.idea.plugin.WorkerStatus
@@ -16,7 +18,6 @@ import com.itangcent.idea.psi.PsiMethodResource
 import com.itangcent.idea.psi.resourceMethod
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.intellij.psi.PsiClassUtils
 import com.itangcent.intellij.util.ActionUtils
 import com.itangcent.intellij.util.FileUtils
@@ -94,7 +95,7 @@ class CachedRequestClassExporter : ClassExporter, Worker {
                             && fileApiCache.lastModified!! > FileUtils.getLastModified(psiFile) ?: System.currentTimeMillis()
                             && fileApiCache.md5 == md5) {
 
-                        if (!fileApiCache.requests.isNullOrEmpty()) {
+                        if (fileApiCache.requests.notNullOrEmpty()) {
                             statusRecorder.newWork()
                             actionContext.runInReadUI {
                                 try {
@@ -132,7 +133,7 @@ class CachedRequestClassExporter : ClassExporter, Worker {
                             tinyRequest.response = request.response
 
                             requests.add(RequestWithKey(
-                                    PsiClassUtils.fullNameOfMemmber(cls, request.resourceMethod()!!)
+                                    PsiClassUtils.fullNameOfMember(cls, request.resourceMethod()!!)
                                     , tinyRequest
                             ))
                         })
@@ -170,7 +171,11 @@ class CachedRequestClassExporter : ClassExporter, Worker {
     private fun readApiFromCache(cls: PsiClass, fileApiCache: FileApiCache, requestHandle: DocHandle) {
         fileApiCache.requests?.forEach { request ->
             val method = request.key?.let { PsiClassUtils.findMethodFromFullName(it, cls as PsiElement) }
-            request.request!!.resource = PsiMethodResource(method!!, cls)
+            if (method == null) {
+                logger?.warn("${request.key} not be found")
+                return@forEach
+            }
+            request.request!!.resource = PsiMethodResource(method, cls)
             requestHandle(request.request!!)
         }
 

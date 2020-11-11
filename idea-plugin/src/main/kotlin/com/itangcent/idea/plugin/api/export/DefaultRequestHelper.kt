@@ -3,7 +3,9 @@ package com.itangcent.idea.plugin.api.export
 import com.google.inject.Singleton
 import com.itangcent.common.constant.Attrs
 import com.itangcent.common.model.*
-import com.itangcent.common.utils.KVUtils
+import com.itangcent.intellij.extend.toPrettyString
+import com.itangcent.common.kit.KVUtils
+import com.itangcent.common.model.*
 import java.util.*
 
 @Singleton
@@ -16,7 +18,7 @@ open class DefaultRequestHelper : RequestHelper {
         request.method = method
     }
 
-    override fun setPath(request: Request, path: String) {
+    override fun setPath(request: Request, path: URL) {
         request.path = path
     }
 
@@ -27,10 +29,11 @@ open class DefaultRequestHelper : RequestHelper {
     override fun addModelAsParam(request: Request, model: Any) {
         if (model is Map<*, *>) {
             val comment = model[Attrs.COMMENT_ATTR] as Map<*, *>?
-            model.forEach { k, v ->
+            val default = model[Attrs.DEFAULT_VALUE_ATTR] as Map<*, *>?
+            model.forEach { (k, v) ->
                 addFormParam(
-                    request, k.toString(), v.toString(),
-                    KVUtils.getUltimateComment(comment, k)
+                        request, k.toString(), (default?.get(k) ?: v).toPrettyString(),
+                        KVUtils.getUltimateComment(comment, k)
                 )
             }
         }
@@ -50,6 +53,10 @@ open class DefaultRequestHelper : RequestHelper {
         request.querys!!.add(param)
     }
 
+    override fun removeParam(request: Request, param: Param) {
+        request.querys?.remove(param)
+    }
+
     override fun addPathParam(request: Request, pathParam: PathParam) {
         if (request.paths == null) {
             request.paths = LinkedList()
@@ -59,6 +66,7 @@ open class DefaultRequestHelper : RequestHelper {
 
     override fun setJsonBody(request: Request, body: Any?, bodyAttr: String?) {
         request.body = body
+        request.bodyAttr = bodyAttr
     }
 
     override fun appendDesc(request: Request, desc: String?) {

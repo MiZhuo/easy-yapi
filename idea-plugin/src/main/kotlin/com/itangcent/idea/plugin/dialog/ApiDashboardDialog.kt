@@ -10,12 +10,13 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.psi.*
 import com.itangcent.common.concurrent.AQSCountLatch
 import com.itangcent.common.concurrent.CountLatch
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.Request
 import com.itangcent.common.utils.DateUtils
+import com.itangcent.common.utils.safeComputeIfAbsent
 import com.itangcent.idea.icons.EasyIcons
 import com.itangcent.idea.icons.iconOnly
 import com.itangcent.idea.plugin.api.export.ClassExporter
-import com.itangcent.idea.plugin.api.export.RequestHelper
 import com.itangcent.idea.plugin.api.export.postman.PostmanCachedApiHelper
 import com.itangcent.idea.plugin.api.export.postman.PostmanFormatter
 import com.itangcent.idea.plugin.api.export.requestOnly
@@ -26,15 +27,15 @@ import com.itangcent.idea.psi.resourceMethod
 import com.itangcent.idea.swing.EasyApiTreeCellRenderer
 import com.itangcent.idea.swing.IconCustomized
 import com.itangcent.idea.swing.SafeHashHelper
-import com.itangcent.idea.swing.Tooltipable
+import com.itangcent.idea.swing.ToolTipAble
 import com.itangcent.idea.utils.SwingUtils
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.extend.guice.PostConstruct
 import com.itangcent.intellij.extend.rx.AutoComputer
 import com.itangcent.intellij.extend.rx.from
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.intellij.psi.PsiClassUtils
+import com.itangcent.intellij.util.FileType
 import org.apache.commons.lang3.exception.ExceptionUtils
 import java.awt.Cursor
 import java.awt.datatransfer.DataFlavor
@@ -82,9 +83,6 @@ class ApiDashboardDialog : JDialog() {
 
     @Inject
     private val classExporter: ClassExporter? = null
-
-    @Inject
-    private val requestHelper: RequestHelper? = null
 
     @Inject
     private val resourceHelper: ResourceHelper? = null
@@ -200,7 +198,7 @@ class ApiDashboardDialog : JDialog() {
     }
 
     @PostConstruct
-    fun postConstruct() {
+    fun init() {
         actionContext!!.hold()
 
         initProjectApiModule()
@@ -307,7 +305,7 @@ class ApiDashboardDialog : JDialog() {
                             { !disposed },
                             {
                                 !disposed
-                                        && (it.name.endsWith("java") || it.name.endsWith("kt"))
+                                        && FileType.acceptable(it.name)
                                         && (it is PsiClassOwner)
                             }) { psiFile ->
                         if (disposed) return@traversal
@@ -320,13 +318,13 @@ class ApiDashboardDialog : JDialog() {
                                 anyFound = true
                                 val resourceClass = request.resourceClass()
 
-                                val clsTreeNode = classNodeMap.computeIfAbsent(resourceClass!!) {
+                                val clsTreeNode = classNodeMap.safeComputeIfAbsent(resourceClass!!) {
                                     val classProjectNodeData = ClassProjectNodeData(this, resourceClass, resourceHelper!!.findAttrOfClass(resourceClass))
                                     val node = DefaultMutableTreeNode(classProjectNodeData)
                                     moduleNode.add(node)
                                     (moduleNode.userObject as ModuleProjectNodeData).addSubProjectNodeData(classProjectNodeData)
-                                    return@computeIfAbsent node
-                                }
+                                    node
+                                }!!
 
                                 val apiProjectNodeData = ApiProjectNodeData(this, request)
 
@@ -837,7 +835,7 @@ class ApiDashboardDialog : JDialog() {
         }
     }
 
-    class ClassProjectNodeData : ProjectNodeData<ApiProjectNodeData>, IconCustomized, Tooltipable {
+    class ClassProjectNodeData : ProjectNodeData<ApiProjectNodeData>, IconCustomized, ToolTipAble {
         override fun toolTip(): String? {
             return cls.qualifiedName
         }
@@ -900,7 +898,7 @@ class ApiDashboardDialog : JDialog() {
         abstract fun next(): ProjectMode
     }
 
-    class ApiProjectNodeData : IconCustomized, Tooltipable {
+    class ApiProjectNodeData : IconCustomized, ToolTipAble {
         override fun toolTip(): String? {
             return "${PsiClassUtils.fullNameOfMethod(request.resourceClass()!!, request.resourceMethod()!!)}\n${request.method}:${request.path}"
         }
@@ -1013,7 +1011,7 @@ class ApiDashboardDialog : JDialog() {
         }
     }
 
-    class PostmanCollectionNodeData : PostmanNodeData, IconCustomized, Tooltipable {
+    class PostmanCollectionNodeData : PostmanNodeData, IconCustomized, ToolTipAble {
         override fun icon(): Icon? {
             return when (status) {
                 NodeStatus.Loading -> EasyIcons.Refresh
@@ -1073,7 +1071,7 @@ class ApiDashboardDialog : JDialog() {
         }
     }
 
-    class PostmanSubCollectionNodeData : PostmanNodeData, IconCustomized, Tooltipable {
+    class PostmanSubCollectionNodeData : PostmanNodeData, IconCustomized, ToolTipAble {
         override fun icon(): Icon? {
             return EasyIcons.Module
         }
@@ -1105,7 +1103,7 @@ class ApiDashboardDialog : JDialog() {
         }
     }
 
-    class PostmanApiNodeData : PostmanNodeData, IconCustomized, Tooltipable {
+    class PostmanApiNodeData : PostmanNodeData, IconCustomized, ToolTipAble {
 
         override fun icon(): Icon? {
             return EasyIcons.Link

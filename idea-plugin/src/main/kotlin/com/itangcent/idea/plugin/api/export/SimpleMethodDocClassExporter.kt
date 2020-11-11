@@ -1,10 +1,10 @@
 package com.itangcent.idea.plugin.api.export
 
 import com.google.inject.Inject
-import com.intellij.lang.jvm.JvmModifier
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiMethod
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.MethodDoc
 import com.itangcent.common.utils.KV
 import com.itangcent.idea.plugin.StatusRecorder
@@ -16,7 +16,6 @@ import com.itangcent.intellij.config.rule.RuleComputer
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.jvm.JvmClassHelper
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import kotlin.reflect.KClass
 
 /**
@@ -154,9 +153,9 @@ open class SimpleMethodDocClassExporter : ClassExporter, Worker {
     }
 
     private fun foreachMethod(cls: PsiClass, handle: (PsiMethod) -> Unit) {
-        cls.allMethods
-                .filter { !jvmClassHelper!!.isBasicMethod(it.name) }
-                .filter { !it.hasModifier(JvmModifier.STATIC) }
+        jvmClassHelper!!.getAllMethods(cls)
+                .filter { !jvmClassHelper.isBasicMethod(it.name) }
+                .filter { !it.hasModifierProperty("static") }
                 .filter { !it.isConstructor }
                 .filter { !shouldIgnore(it) }
                 .forEach(handle)

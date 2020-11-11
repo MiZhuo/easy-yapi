@@ -6,8 +6,8 @@ import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiField
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.util.PropertyUtil
+import com.itangcent.common.utils.notNullOrBlank
 import com.itangcent.intellij.jvm.DocHelper
-import com.itangcent.intellij.jvm.PsiClassHelper
 import com.itangcent.intellij.psi.PsiClassUtils
 
 @Singleton
@@ -15,8 +15,6 @@ open class DefaultLinkResolver : LinkResolver {
 
     @Inject
     private val docHelper: DocHelper? = null
-    @Inject
-    private val psiClassHelper: PsiClassHelper? = null
 
     override fun linkToClass(linkClass: Any): String? {
         if (linkClass !is PsiClass) {
@@ -34,8 +32,8 @@ open class DefaultLinkResolver : LinkResolver {
             return "[$linkMethod]"
         }
         val attrOfMethod = docHelper!!.getAttrOfDocComment(linkMethod)
-            ?.lines()?.first { !it.isBlank() }
-        if (!attrOfMethod.isNullOrBlank()) {
+                ?.lines()?.first { !it.isBlank() }
+        if (attrOfMethod.notNullOrBlank()) {
             return "[$attrOfMethod]"
         }
 
@@ -54,7 +52,7 @@ open class DefaultLinkResolver : LinkResolver {
         if (linkField !is PsiField) {
             return "[$linkField]"
         }
-        val attrOfProperty = psiClassHelper!!.getAttrOfField(linkField)
+        val attrOfProperty = docHelper!!.getAttrOfField(linkField)
         return when {
             attrOfProperty.isNullOrBlank() -> "[${PsiClassUtils.fullNameOfField(linkField)}]"
             else -> "[$attrOfProperty]"

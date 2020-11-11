@@ -10,7 +10,7 @@ interface RequestHelper {
 
     fun setMethod(request: Request, method: String)
 
-    fun setPath(request: Request, path: String)
+    fun setPath(request: Request, path: URL)
 
     /**
      * addAsJsonBody if content-type is json
@@ -23,6 +23,8 @@ interface RequestHelper {
     fun addFormParam(request: Request, formParam: FormParam)
 
     fun addParam(request: Request, param: Param)
+
+    fun removeParam(request: Request, param: Param)
 
     fun addPathParam(request: Request, pathParam: PathParam)
 
@@ -46,24 +48,26 @@ interface RequestHelper {
 }
 
 //region utils------------------------------------------------------------------
+
 fun RequestHelper.addParam(request: Request, paramName: String, defaultVal: String?, attr: String?) {
     addParam(request, paramName, defaultVal, false, attr)
 }
 
-fun RequestHelper.addParam(request: Request, paramName: String, defaultVal: String?, required: Boolean, desc: String?) {
+fun RequestHelper.addParam(request: Request, paramName: String, defaultVal: String?, required: Boolean, desc: String?): Param {
     val param = Param()
     param.name = paramName
     param.value = defaultVal
     param.required = required
     param.desc = desc
     this.addParam(request, param)
+    return param
 }
 
 fun RequestHelper.addFormParam(request: Request, paramName: String, defaultVal: String?, desc: String?) {
     addFormParam(request, paramName, defaultVal, false, desc)
 }
 
-fun RequestHelper.addFormParam(request: Request, paramName: String, defaultVal: String?, required: Boolean, desc: String?) {
+fun RequestHelper.addFormParam(request: Request, paramName: String, defaultVal: String?, required: Boolean, desc: String?): FormParam {
     val param = FormParam()
     param.name = paramName
     param.value = defaultVal
@@ -71,28 +75,47 @@ fun RequestHelper.addFormParam(request: Request, paramName: String, defaultVal: 
     param.desc = desc
     param.type = "text"
     this.addFormParam(request, param)
+    return param
 }
 
-fun RequestHelper.addFormFileParam(request: Request, paramName: String, required: Boolean, desc: String?) {
+fun RequestHelper.addFormFileParam(request: Request, paramName: String, required: Boolean, desc: String?): FormParam {
     val param = FormParam()
     param.name = paramName
     param.required = required
     param.desc = desc
     param.type = "file"
     this.addFormParam(request, param)
+    return param
 }
 
-fun RequestHelper.addHeader(request: Request, name: String, value: String) {
+fun RequestHelper.addHeader(request: Request, name: String, value: String): Header {
     val header = Header()
     header.name = name
     header.value = value
     header.required = true
     addHeader(request, header)
+    return header
+}
+
+fun RequestHelper.addHeaderIfMissed(request: Request, name: String, value: String): Boolean {
+    if (request.header(name) != null) {
+        return false
+    }
+    addHeader(request, name, value)
+    return true
 }
 
 fun RequestHelper.addPathParam(request: Request, name: String, desc: String) {
     val pathParam = PathParam()
     pathParam.name = name
+    pathParam.desc = desc
+    this.addPathParam(request, pathParam)
+}
+
+fun RequestHelper.addPathParam(request: Request, name: String, value: String, desc: String?) {
+    val pathParam = PathParam()
+    pathParam.name = name
+    pathParam.value = value
     pathParam.desc = desc
     this.addPathParam(request, pathParam)
 }
@@ -103,4 +126,16 @@ fun RequestHelper.addResponseHeader(response: Response, name: String, value: Str
     header.value = value
     addResponseHeader(response, header)
 }
+
+fun RequestHelper.setMethodIfMissed(request: Request, method: String) {
+    if (request.hasMethod()) {
+        return
+    }
+    this.setMethod(request, method)
+}
+
+fun RequestHelper.setContentType(request: Request, contentType: String) {
+    this.addHeader(request, "Content-Type", contentType)
+}
+
 //endregion utils------------------------------------------------------------------

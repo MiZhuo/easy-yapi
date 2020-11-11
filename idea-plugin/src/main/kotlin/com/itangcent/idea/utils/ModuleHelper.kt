@@ -7,13 +7,14 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiMethod
+import com.itangcent.common.logger.traceError
+import com.itangcent.common.utils.notNullOrBlank
 import com.itangcent.idea.plugin.api.export.ClassExportRuleKeys
 import com.itangcent.idea.psi.PsiResource
 import com.itangcent.intellij.config.rule.RuleComputer
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.logger.Logger
 import com.itangcent.intellij.util.ActionUtils
-import com.itangcent.intellij.logger.traceError
 import org.apache.commons.lang3.StringUtils
 import java.io.File
 
@@ -47,10 +48,18 @@ class ModuleHelper {
     }
 
     fun findModule(psiMethod: PsiMethod): String? {
+
+        val moduleByRule = ruleComputer!!.computer(ClassExportRuleKeys.MODULE, psiMethod)
+        if (moduleByRule.notNullOrBlank()) {
+            return moduleByRule
+        }
+
+
         val containingClass = psiMethod.containingClass
         if (containingClass != null) {
             return findModule(containingClass)
         }
+
         val module = ModuleUtil.findModuleForPsiElement(psiMethod)
         if (module != null) {
             return module.name
@@ -62,7 +71,7 @@ class ModuleHelper {
 
         val moduleByRule = ruleComputer!!.computer(ClassExportRuleKeys.MODULE, cls)
 
-        if (!moduleByRule.isNullOrBlank()) {
+        if (moduleByRule.notNullOrBlank()) {
             return moduleByRule
         }
 
@@ -97,10 +106,11 @@ class ModuleHelper {
                 currentPath.contains(main) -> currentPath = StringUtils.substringBefore(currentPath, main)
                 currentPath.contains(java) -> currentPath = StringUtils.substringBefore(currentPath, java)
                 currentPath.contains(kotlin) -> currentPath = StringUtils.substringBefore(currentPath, kotlin)
+                currentPath.contains(scala) -> currentPath = StringUtils.substringBefore(currentPath, scala)
             }
             module = StringUtils.substringAfterLast(currentPath, File.separator)
         } catch (e: Exception) {
-            logger!!.traceError("error in findCurrentPath",e)
+            logger!!.traceError("error in findCurrentPath", e)
 
         }
         return module
@@ -113,6 +123,7 @@ class ModuleHelper {
         private val main = "${File.separator}main${File.separator}"
         private val java = "${File.separator}java${File.separator}"
         private val kotlin = "${File.separator}kotlin${File.separator}"
+        private val scala = "${File.separator}scala${File.separator}"
 
     }
 }

@@ -4,34 +4,37 @@ import com.google.inject.Inject
 import com.google.inject.Singleton
 import com.intellij.psi.PsiClass
 import com.itangcent.common.constant.Attrs
+import com.itangcent.common.kit.KVUtils
+import com.itangcent.common.kit.KitUtils
 import com.itangcent.common.model.Doc
 import com.itangcent.common.model.MethodDoc
 import com.itangcent.common.model.Request
 import com.itangcent.common.utils.DateUtils
-import com.itangcent.common.utils.KVUtils
-import com.itangcent.common.utils.KitUtils
-import com.itangcent.idea.plugin.api.export.DefaultDocParseHelper
+import com.itangcent.common.utils.notNullOrBlank
+import com.itangcent.common.utils.notNullOrEmpty
+import com.itangcent.common.utils.safeComputeIfAbsent
+import com.itangcent.http.RequestUtils
+import com.itangcent.idea.plugin.api.export.Folder
+import com.itangcent.idea.plugin.api.export.FormatFolderHelper
+import com.itangcent.idea.plugin.api.export.postman.PostmanFormatter
+import com.itangcent.idea.plugin.settings.MarkdownFormatType
 import com.itangcent.idea.plugin.settings.SettingBinder
 import com.itangcent.idea.psi.ResourceHelper
 import com.itangcent.idea.utils.ModuleHelper
-import com.itangcent.idea.utils.RequestUtils
 import com.itangcent.intellij.context.ActionContext
-import com.itangcent.intellij.logger.Logger
+import com.itangcent.intellij.extend.toPrettyString
 import com.itangcent.intellij.util.ActionUtils
 import com.itangcent.intellij.util.forEachValid
 import java.util.*
 
+/**
+ * format [com.itangcent.common.model.Doc] to `markdown`.
+ */
 @Singleton
 class MarkdownFormatter {
 
     @Inject
-    private val logger: Logger? = null
-
-    @Inject
     private val actionContext: ActionContext? = null
-
-    @Inject
-    private val docParseHelper: DefaultDocParseHelper? = null
 
     @Inject
     private val moduleHelper: ModuleHelper? = null
@@ -42,7 +45,10 @@ class MarkdownFormatter {
     @Inject
     protected val resourceHelper: ResourceHelper? = null
 
-    fun parseRequests(requests: MutableList<Doc>): String {
+    @Inject
+    private val formatFolderHelper: FormatFolderHelper? = null
+
+    fun parseRequests(requests: List<Doc>): String {
         val sb = StringBuilder()
         val groupedRequest = groupRequests(requests)
         parseApi(groupedRequest, 1) { sb.append(it) }
@@ -50,51 +56,76 @@ class MarkdownFormatter {
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun groupRequests(docs: MutableList<Doc>): Any {
+    private fun groupRequests(requests: List<Doc>): Any {
 
-        //group by class into: {class:requests}
-        val clsGroupedMap: HashMap<Any, ArrayList<Any?>> = HashMap()
-        docs.forEach { request ->
-            val resource = request.resource?.let { resourceHelper!!.findResourceClass(it) } ?: NULL_RESOURCE
-            clsGroupedMap.computeIfAbsent(resource) { ArrayList() }
-                .add(request)
-        }
 
-        //only one class
-        if (clsGroupedMap.size == 1) {
-            clsGroupedMap.entries.first()
-                .let {
-                    val module = moduleHelper!!.findModule(it.key) ?: "easy-api"
-                    return wrapInfo(module, arrayListOf(wrapInfo(it.key, it.value)))
-                }
-        }
+        //parse [request...] ->
+        //                      {
+        //                          "module":{
+        //                              "folder":[request...]
+        //                          }
+        //                      }
+
+        val moduleFolderApiMap: HashMap<String, HashMap<Folder, ArrayList<Doc>>> = HashMap()
 
         //group by module
-        val moduleGroupedMap: HashMap<Any, ArrayList<Any?>> = HashMap()
-        clsGroupedMap.forEach { cls, items ->
-            val module = moduleHelper!!.findModule(cls) ?: "easy-api"
-            moduleGroupedMap.computeIfAbsent(module) { ArrayList() }
-                .add(wrapInfo(cls, items))
+        val moduleGroupedMap: HashMap<String, MutableList<Doc>> = HashMap()
+        requests.forEach { request ->
+            val module = request.resource?.let { moduleHelper!!.findModule(it) } ?: "easy-api"
+            moduleGroupedMap.safeComputeIfAbsent(module) { ArrayList() }!!
+                    .add(request)
         }
 
-        //only one module
-        if (moduleGroupedMap.size == 1) {
-            moduleGroupedMap.entries.first()
-                .let {
-                    return wrapInfo(it.key, arrayListOf(wrapInfo(it.key, it.value)))
+        moduleGroupedMap.forEach { module, requestsInModule ->
+            moduleFolderApiMap[module] = parseRequestsToFolder(requestsInModule)
+        }
+
+
+        if (moduleFolderApiMap.size == 1) {
+            //single module
+            val folderApiMap = moduleFolderApiMap.values.first()
+            if (folderApiMap.size == 1) {
+                //single folder
+                folderApiMap.entries.first().let {
+                    return wrapInfo(it.key, it.value)
                 }
+            } else {
+                moduleFolderApiMap.entries.first().let { moduleAndFolders ->
+                    val items: ArrayList<HashMap<String, Any?>> = ArrayList()
+                    moduleAndFolders.value.forEach { items.add(wrapInfo(it.key, it.value)) }
+                    return wrapInfo(moduleAndFolders.key, items)
+                }
+            }
         }
 
         val modules: ArrayList<HashMap<String, Any?>> = ArrayList()
-        moduleGroupedMap.entries
-            .map { wrapInfo(it.key, arrayListOf(wrapInfo(it.key, it.value))) }
-            .forEach { modules.add(it) }
+        moduleFolderApiMap.entries
+                .map { moduleAndFolders ->
+                    val items: ArrayList<HashMap<String, Any?>> = ArrayList()
+                    moduleAndFolders.value.forEach { items.add(wrapInfo(it.key, it.value)) }
+                    return@map wrapInfo(moduleAndFolders.key, items)
+                }
+                .forEach { modules.add(it) }
 
         val rootModule = moduleHelper!!.findModuleByPath(ActionUtils.findCurrentPath()) ?: "easy-api"
-        return wrapInfo(
-            "$rootModule-${DateUtils.format(DateUtils.now(), "yyyyMMddHHmmss")}",
-            modules as ArrayList<Any?>
-        )
+        return wrapInfo(rootModule, modules)
+    }
+
+    private fun parseRequestsToFolder(requests: MutableList<Doc>): HashMap<Folder, ArrayList<Doc>> {
+        //parse [request...] ->
+        //                      {
+        //                          "folder":[request...]
+        //                      }
+
+        //group by folder into: {folder:requests}
+        val folderGroupedMap: HashMap<Folder, ArrayList<Doc>> = HashMap()
+        requests.forEach { request ->
+            val folder = formatFolderHelper!!.resolveFolder(request.resource ?: PostmanFormatter.NULL_RESOURCE)
+            folderGroupedMap.safeComputeIfAbsent(folder) { ArrayList() }!!
+                    .add(request)
+        }
+
+        return folderGroupedMap
     }
 
     private fun parseApi(info: Any, deep: Int, handle: (String) -> Unit) {
@@ -115,130 +146,129 @@ class MarkdownFormatter {
             handle("\n\n")
         }
         (info[ITEMS] as List<*>)
-            .filterNotNull()
-            .forEach {
-                parseApi(it, deep + 1, handle)
-                handle("\n\n")
-            }
+                .filterNotNull()
+                .forEach {
+                    parseApi(it, deep + 1, handle)
+                    handle("\n\n")
+                }
     }
 
     private fun parseMethodDoc(methodDoc: MethodDoc, deep: Int, handle: (String) -> Unit) {
 
-        handle("---\n")
-        handle("${hN(deep)} ${methodDoc.name}\n\n")
-        handle("<a id=${methodDoc.name}> </a>\n\n")
+        val objectFormatter = getObjectFormatter(handle)
 
-        if (!methodDoc.desc.isNullOrBlank()) {
+        handle("\n---\n")
+        handle("${hN(deep)} ${methodDoc.name}\n\n")
+
+        if (methodDoc.desc.notNullOrBlank()) {
             handle("**Desc：**\n\n")
-            handle("<p>${methodDoc.desc}</p>\n\n")
+            handle("${methodDoc.desc}\n\n")
         }
 
         handle("\n**Params：**\n\n")
         if (methodDoc.params.isNullOrEmpty()) {
             handle("Non-Parameter\n")
         } else {
-            handle("| name  |  type  |  desc  |\n")
-            handle("| ------------ | ------------ | ------------ |\n")
-            methodDoc.params?.forEach { parseBody(1, it.name ?: "", it.desc ?: "", it.value, handle) }
+            objectFormatter.transaction {
+                methodDoc.params?.forEach {
+                    objectFormatter.writeObject(it.value, it.name ?: "", it.desc ?: "")
+                }
+            }
         }
 
         handle("\n**Return：**\n\n")
         if (methodDoc.ret == null) {
             handle("Non-Return\n")
         } else {
-            handle("| name  |  type  |  desc  |\n")
-            handle("| ------------ | ------------ | ------------ |\n")
-            methodDoc.ret?.let { parseBody(0, "", methodDoc.retDesc ?: "", it, handle) }
+            methodDoc.ret?.let {
+                objectFormatter.writeObject(it, methodDoc.retDesc ?: "")
+            }
         }
-
     }
 
     private fun parseRequest(request: Request, deep: Int, handle: (String) -> Unit) {
 
-        handle("---\n")
+        val objectFormatter = getObjectFormatter(handle)
+
+        handle("\n---\n")
         handle("${hN(deep)} ${request.name}\n\n")
-        handle("<a id=${request.name}> </a>\n\n")
 
         //region basic info
         handle("${hN(deep + 1)} BASIC\n\n")
         handle("**Path：** ${request.path}\n\n")
         handle("**Method：** ${request.method}\n\n")
-        if (!request.desc.isNullOrBlank()) {
+        if (request.desc.notNullOrBlank()) {
             handle("**Desc：**\n\n")
-            handle("<p>${request.desc}</p>\n\n")
+            handle("${request.desc}\n\n")
         }
         //endregion
 
         handle("${hN(deep + 1)} REQUEST\n\n")
 
         //path
-        if (!request.paths.isNullOrEmpty()) {
+        if (request.paths.notNullOrEmpty()) {
             handle("\n**Path Params：**\n\n")
             handle("| name  |  value   | desc  |\n")
             handle("| ------------ | ------------ | ------------ |\n")
             request.paths!!.forEach {
                 handle(
-                    "| ${it.name} | ${it.value ?: ""} |" +
-                            " ${escape(it.desc)} |\n"
+                        "| ${it.name} | ${it.value ?: ""} |" +
+                                " ${escape(it.desc)} |\n"
                 )
             }
         }
 
         //header
-        if (!request.headers.isNullOrEmpty()) {
+        if (request.headers.notNullOrEmpty()) {
             handle("\n**Headers：**\n\n")
-            handle("| name  |  value  |  required | example  | desc  |\n")
-            handle("| ------------ | ------------ | ------------ | ------------ | ------------ |\n")
+            handle("| name  |  value  |  required  | desc  |\n")
+            handle("| ------------ | ------------ | ------------ | ------------ |\n")
             request.headers!!.forEach {
                 handle(
-                    "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(it.required ?: false, "YES", "NO")} |" +
-                            " ${it.example ?: ""} | ${escape(it.desc)} |\n"
+                        "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(it.required
+                                ?: false, "YES", "NO")} | ${escape(it.desc)} |\n"
                 )
             }
         }
 
         //query
-        if (!request.querys.isNullOrEmpty()) {
+        if (request.querys.notNullOrEmpty()) {
             handle("\n**Query：**\n\n")
             handle("| name  |  value  |  required | desc  |\n")
             handle("| ------------ | ------------ | ------------ | ------------ |\n")
             request.querys!!.forEach {
                 handle(
-                    "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(it.required ?: false, "YES", "NO")} |" +
-                            " ${escape(it.desc)} |\n"
+                        "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(it.required ?: false, "YES", "NO")} |" +
+                                " ${escape(it.desc)} |\n"
                 )
             }
         }
 
-        if (request.method != "GET") {
+        if (request.body != null) {
 
-            if (request.body != null) {
+            handle("\n**RequestBody**\n\n")
+            objectFormatter.writeObject(request.body, request.bodyAttr ?: "")
 
-                handle("\n**RequestBody**\n\n")
-                handle("| name  |  type  |  desc  |\n")
-                handle("| ------------ | ------------ | ------------ |\n")
-                parseBody(0, "", "", request.body, handle)
-
-                if (settingBinder!!.read().outputDemo) {
-                    handle("\n**Request Demo：**\n\n")
-                    parseToJson(handle, request.body)
-                }
-
-            } else if (!request.formParams.isNullOrEmpty()) {
-                handle("\n**Form：**\n\n")
-                handle("| name  |  value  | required |  type  |  desc  |\n")
-                handle("| ------------ | ------------ | ------------ | ------------ | ------------ |\n")
-                request.formParams!!.forEach {
-                    handle(
-                        "| ${it.name} | ${it.value} | ${KitUtils.fromBool(it.required ?: false, "YES", "NO")} |" +
-                                " ${it.type} | ${escape(it.desc)} |\n"
-                    )
-                }
+            if (settingBinder!!.read().outputDemo) {
+                handle("\n**Request Demo：**\n\n")
+                parseToJson(handle, request.body)
             }
 
         }
 
-        if (!request.response.isNullOrEmpty()) {
+        if (request.formParams.notNullOrEmpty()) {
+            handle("\n**Form：**\n\n")
+            handle("| name  |  value  | required |  type  |  desc  |\n")
+            handle("| ------------ | ------------ | ------------ | ------------ | ------------ |\n")
+            request.formParams!!.forEach {
+                handle(
+                        "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(it.required ?: false, "YES", "NO")} |" +
+                                " ${it.type} | ${escape(it.desc)} |\n"
+                )
+            }
+        }
+
+        if (request.response.notNullOrEmpty()) {
 
             val response = request.response!!.firstOrNull { it.body != null }
             //todo:support multiple response
@@ -246,22 +276,21 @@ class MarkdownFormatter {
                 handle("\n\n")
                 handle("${hN(deep + 1)} RESPONSE\n\n")
                 handle("**Header：**\n\n")
-                handle("| name  |  value  |  required | example  | desc  |\n")
+                handle("| name  |  value  |  required  | desc  |\n")
                 handle("| ------------ | ------------ | ------------ | ------------ | ------------ |\n")
                 response.headers!!.forEach {
                     handle(
-                        "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(
-                            it.required
-                                ?: false, "YES", "NO"
-                        )} |" +
-                                " ${it.example ?: ""} | ${escape(it.desc)} |\n"
+                            "| ${it.name} | ${it.value ?: ""} | ${KitUtils.fromBool(
+                                    it.required
+                                            ?: false, "YES", "NO"
+                            )} |  ${escape(it.desc)} |\n"
                     )
                 }
 
                 handle("\n**Body：**\n\n")
-                handle("| name  |  type  |  desc  |\n")
-                handle("| ------------ | ------------ | ------------ |\n")
-                response.body?.let { parseBody(0, "", response.bodyDesc ?: "", it, handle) }
+                response.body?.let {
+                    objectFormatter.writeObject(it, response.bodyDesc ?: "")
+                }
 
                 // handler json example
                 if (settingBinder!!.read().outputDemo) {
@@ -283,12 +312,142 @@ class MarkdownFormatter {
         handle("\n```\n")
     }
 
+    private fun hN(n: Int): String {
+        return "#".repeat(n)
+    }
+
+    private fun wrapInfo(resource: Any, items: List<Any?>): HashMap<String, Any?> {
+        val info: HashMap<String, Any?> = HashMap()
+        parseNameAndDesc(resource, info)
+        info[ITEMS] = items
+        return info
+    }
+
+    fun parseNameAndDesc(resource: Any, info: HashMap<String, Any?>) {
+        if (resource is PsiClass) {
+            val attr = resourceHelper!!.findAttrOfClass(resource)
+            if (attr.isNullOrBlank()) {
+                info["name"] = resource.name!!
+                info["description"] = "exported from:${actionContext!!.callInReadUI { resource.qualifiedName }}"
+            } else {
+                val lines = attr.lines()
+                if (lines.size == 1) {
+                    info["name"] = attr
+                    info["description"] = "exported from:${actionContext!!.callInReadUI { resource.qualifiedName }}"
+                } else {
+                    info["name"] = lines[0]
+                    info["description"] = attr
+                }
+            }
+        } else if (resource is Folder) {
+            info["name"] = resource.name
+            info["description"] = resource.attr
+        } else if (resource is Pair<*, *>) {
+            info["name"] = resource.first
+            info["description"] = resource.second
+        } else {
+            info["name"] = resource.toString()
+            info["description"] = "exported at ${DateUtils.formatYMD_HMS(DateUtils.now())}"
+        }
+    }
+
+    companion object {
+        private const val NAME = "name"
+        private const val DESC = "desc"
+        private const val ITEMS = "items"
+    }
+
+    private fun getObjectFormatter(handle: (String) -> Unit): ObjectFormatter {
+        val markdownFormatType = settingBinder!!.read().markdownFormatType
+        return if (markdownFormatType == MarkdownFormatType.ULTIMATE.name) {
+            UltimateObjectFormatter(handle)
+        } else {
+            SimpleObjectFormatter(handle)
+        }
+    }
+
+}
+
+private interface ObjectFormatter {
+
+    fun writeObject(obj: Any?, desc: String) {
+        writeObject(obj, "", desc)
+    }
+
+    fun writeObject(obj: Any?, name: String, desc: String)
+
+    fun transaction(action: (ObjectFormatter) -> Unit)
+}
+
+private abstract class AbstractObjectFormatter(val handle: (String) -> Unit) : ObjectFormatter {
+
+    private var inStream = -1
+
+    override fun writeObject(obj: Any?, name: String, desc: String) {
+        if (inStream == -1 || inStream++ == 0) {
+            writeHeader()
+        }
+        writeBody(obj, name, desc)
+    }
+
+    abstract fun writeHeader()
+
+    abstract fun writeBody(obj: Any?, name: String, desc: String)
+
+    protected fun writeHeaders(vararg headers: String) {
+        headers.forEach { handle("| $it ") }
+        handle("|\n")
+        repeat(headers.size) { handle("| ------------ ") }
+        handle("|\n")
+    }
+
+    protected fun addBodyProperty(deep: Int, vararg columns: Any?) {
+        handle("| ")
+        if (deep > 1) {
+            handle("&ensp;&ensp;".repeat(deep - 1))
+            handle("&#124;─")
+        }
+        columns.forEach { handle("${format(it)} | ") }
+        handle("\n")
+    }
+
+    fun format(any: Any?): String {
+        if (any == null) {
+            return ""
+        }
+        if (any is Boolean) {
+            return if (any) "YES" else "NO"
+        }
+
+        return escape(any.toPrettyString())
+    }
+
+    override fun transaction(action: (ObjectFormatter) -> Unit) {
+        inStream = 0
+        try {
+            action(this)
+        } catch (e: Throwable) {
+            inStream = -1
+        }
+    }
+}
+
+private class SimpleObjectFormatter(handle: (String) -> Unit) : AbstractObjectFormatter(handle) {
+
+    override fun writeHeader() {
+        writeHeaders("name", "type", "desc")
+    }
+
+    override fun writeBody(obj: Any?, name: String, desc: String) {
+        writeBody(obj, name, desc, 0)
+    }
+
     @Suppress("UNCHECKED_CAST")
-    private fun parseBody(deep: Int, name: String, desc: String, obj: Any?, handle: (String) -> Unit) {
+    fun writeBody(obj: Any?, name: String, desc: String, deep: Int) {
 
         var type: String? = null
         when (obj) {
-            obj == null -> type = "object"
+            null -> type = "object"
             is String -> type = "string"
             is Number -> type = if (obj is Int || obj is Long) {
                 "integer"
@@ -298,28 +457,28 @@ class MarkdownFormatter {
             is Boolean -> type = "boolean"
         }
         if (type != null) {
-            addBodyProperty(deep, name, type, desc, handle)
+            addBodyProperty(deep, name, type, desc)
             return
         }
 
         if (obj is Array<*>) {
-            addBodyProperty(deep, name, "array", desc, handle)
+            addBodyProperty(deep, name, "array", desc)
 
             if (obj.size > 0) {
-                parseBody(deep + 1, "", "", obj[0], handle)
+                writeBody(obj[0], "", "", deep + 1)
             } else {
-                parseBody(deep + 1, "", "", null, handle)
+                writeBody(null, "", "", deep + 1)
             }
         } else if (obj is List<*>) {
-            addBodyProperty(deep, name, "array", desc, handle)
+            addBodyProperty(deep, name, "array", desc)
             if (obj.size > 0) {
-                parseBody(deep + 1, "", "", obj[0], handle)
+                writeBody(obj[0], "", "", deep + 1)
             } else {
-                parseBody(deep + 1, "", "", null, handle)
+                writeBody(null, "", "", deep + 1)
             }
         } else if (obj is Map<*, *>) {
             if (deep > 0) {
-                addBodyProperty(deep, name, "object", desc, handle)
+                addBodyProperty(deep, name, "object", desc)
             }
             var comment: HashMap<String, Any?>? = null
             try {
@@ -328,64 +487,82 @@ class MarkdownFormatter {
             }
             obj.forEachValid { k, v ->
                 val propertyDesc: String? = KVUtils.getUltimateComment(comment, k)
-                parseBody(deep + 1, k.toString(), propertyDesc ?: "", v, handle)
+                writeBody(v, k.toString(), propertyDesc ?: "", deep + 1)
             }
         } else {
-            addBodyProperty(deep, name, "object", desc, handle)
+            addBodyProperty(deep, name, "object", desc)
         }
     }
 
-    private fun addBodyProperty(deep: Int, name: String, type: String, desc: String, handle: (String) -> Unit) {
-        handle("| ")
-        if (deep > 1) {
-            handle("&ensp;&ensp;".repeat(deep - 1))
-            handle("&#124;─")
-        }
-        handle("$name | $type | ${escape(desc)} |\n")
+}
+
+private class UltimateObjectFormatter(handle: (String) -> Unit) : AbstractObjectFormatter(handle) {
+
+    override fun writeHeader() {
+        writeHeaders("name", "type", "required", "default", "desc")
     }
 
-    private fun hN(n: Int): String {
-        return "#".repeat(n)
+    override fun writeBody(obj: Any?, name: String, desc: String) {
+        writeBody(obj, name, null, null, desc, 0)
     }
 
-    private fun wrapInfo(resource: Any, items: ArrayList<Any?>): HashMap<String, Any?> {
-        val info: HashMap<String, Any?> = HashMap()
-        parseNameAndDesc(resource, info)
-        info[ITEMS] = items
-        return info
-    }
+    @Suppress("UNCHECKED_CAST")
+    fun writeBody(obj: Any?, name: String, required: Boolean?, default: String?, desc: String, deep: Int) {
 
-    private fun parseNameAndDesc(resource: Any, info: HashMap<String, Any?>) {
-        if (resource is PsiClass) {
-            val attr = resourceHelper!!.findAttrOfClass(resource)
-            if (attr.isNullOrBlank()) {
-                info[NAME] = resource.name!!
-                info[DESC] = "exported from module:${resource.qualifiedName}"
+        var type: String? = null
+        when (obj) {
+            null -> type = "object"
+            is String -> type = "string"
+            is Number -> type = if (obj is Int || obj is Long) {
+                "integer"
             } else {
-                val lines = attr.lines()
-                if (lines.size == 1) {
-                    info[NAME] = attr
-                    info[DESC] = "exported from module:${actionContext!!.callInReadUI { resource.qualifiedName }}"
-                } else {
-                    info[NAME] = lines[0]
-                    info[DESC] = attr
-                }
+                "number"
+            }
+            is Boolean -> type = "boolean"
+        }
+        if (type != null) {
+            addBodyProperty(deep, name, type, required, default, desc)
+            return
+        }
+
+        if (obj is Array<*>) {
+            addBodyProperty(deep, name, "array", required, default, desc)
+            if (obj.size > 0) {
+                writeBody(obj[0], "", null, null, "", deep + 1)
+            } else {
+                writeBody(null, "", null, null, "", deep + 1)
+            }
+        } else if (obj is List<*>) {
+            addBodyProperty(deep, name, "array", desc)
+            if (obj.size > 0) {
+                writeBody(obj[0], "", null, null, "", deep + 1)
+            } else {
+                writeBody(null, "", null, null, "", deep + 1)
+            }
+        } else if (obj is Map<*, *>) {
+            if (deep > 0) {
+                addBodyProperty(deep, name, "object", required, default, desc)
+            }
+            val comments: HashMap<String, Any?>? = obj[Attrs.COMMENT_ATTR] as? HashMap<String, Any?>?
+            val requireds: HashMap<String, Any?>? = obj[Attrs.REQUIRED_ATTR] as? HashMap<String, Any?>?
+            val defaults: HashMap<String, Any?>? = obj[Attrs.DEFAULT_VALUE_ATTR] as? HashMap<String, Any?>?
+            obj.forEachValid { k, v ->
+                val key = k.toString()
+                val propertyDesc: String? = KVUtils.getUltimateComment(comments, k)
+                writeBody(v, key,
+                        requireds?.get(key) as? Boolean,
+                        defaults?.get(key) as? String,
+                        propertyDesc ?: "",
+                        deep + 1)
             }
         } else {
-            info[NAME] = "$resource-${DateUtils.format(DateUtils.now(), "yyyyMMddHHmmss")}"
-            info[DESC] = "exported at ${DateUtils.formatYMD_HMS(DateUtils.now())}"
+            addBodyProperty(deep, name, "object", required, default, desc)
         }
     }
 
-    private fun escape(str: String?): String {
-        if (str.isNullOrBlank()) return ""
-        return str.replace("\n", "<br>")
-    }
+}
 
-    companion object {
-        private const val NAME = "name"
-        private const val DESC = "desc"
-        private const val ITEMS = "items"
-        private val NULL_RESOURCE = Any()
-    }
+private fun escape(str: String?): String {
+    if (str.isNullOrBlank()) return ""
+    return str.replace("\n", "<br>")
 }

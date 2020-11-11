@@ -5,24 +5,23 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
-import com.intellij.psi.PsiClass
-import com.intellij.psi.PsiMember
 import com.intellij.psi.PsiMethod
-import com.intellij.util.containers.ContainerUtil
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.model.Doc
 import com.itangcent.common.model.MethodDoc
 import com.itangcent.common.model.Request
 import com.itangcent.common.utils.GsonUtils
+import com.itangcent.common.utils.filterAs
+import com.itangcent.common.utils.notNullOrBlank
+import com.itangcent.common.utils.notNullOrEmpty
+import com.itangcent.debug.LoggerCollector
 import com.itangcent.idea.plugin.Worker
 import com.itangcent.idea.plugin.api.cache.DefaultFileApiCacheRepository
 import com.itangcent.idea.plugin.api.cache.FileApiCacheRepository
 import com.itangcent.idea.plugin.api.cache.ProjectCacheRepository
 import com.itangcent.idea.plugin.api.export.*
 import com.itangcent.idea.plugin.api.export.markdown.MarkdownFormatter
-import com.itangcent.idea.plugin.api.export.postman.PostmanApiHelper
-import com.itangcent.idea.plugin.api.export.postman.PostmanCachedApiHelper
-import com.itangcent.idea.plugin.api.export.postman.PostmanConfigReader
-import com.itangcent.idea.plugin.api.export.postman.PostmanFormatter
+import com.itangcent.idea.plugin.api.export.postman.*
 import com.itangcent.idea.plugin.api.export.yapi.*
 import com.itangcent.idea.plugin.config.RecommendConfigReader
 import com.itangcent.idea.plugin.dialog.SuvApiExportDialog
@@ -31,9 +30,12 @@ import com.itangcent.idea.plugin.script.GroovyActionExtLoader
 import com.itangcent.idea.plugin.script.LoggerBuffer
 import com.itangcent.idea.plugin.settings.SettingBinder
 import com.itangcent.idea.psi.PsiResource
+import com.itangcent.idea.utils.Charsets
 import com.itangcent.idea.utils.CustomizedPsiClassHelper
 import com.itangcent.idea.utils.FileSaveHelper
+import com.itangcent.idea.utils.RuleComputeListenerRegistry
 import com.itangcent.intellij.config.ConfigReader
+import com.itangcent.intellij.config.rule.RuleComputeListener
 import com.itangcent.intellij.config.rule.RuleParser
 import com.itangcent.intellij.constant.EventKey
 import com.itangcent.intellij.context.ActionContext
@@ -44,13 +46,12 @@ import com.itangcent.intellij.file.LocalFileRepository
 import com.itangcent.intellij.jvm.PsiClassHelper
 import com.itangcent.intellij.jvm.PsiResolver
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.intellij.psi.SelectedHelper
 import com.itangcent.intellij.tip.TipsHelper
+import com.itangcent.intellij.util.FileType
 import com.itangcent.intellij.util.UIUtils
 import com.itangcent.suv.http.ConfigurableHttpClientProvider
 import com.itangcent.suv.http.HttpClientProvider
-import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.exception.ExceptionUtils
 import java.util.*
 import kotlin.reflect.KClass
@@ -68,15 +69,17 @@ class SuvApiExporter {
     @Inject
     private val classExporter: ClassExporter? = null
 
-
     @Suppress("UNCHECKED_CAST")
     fun showExportWindow() {
 
         logger!!.info("Start find apis...")
+
+        LoggerCollector.getLog().takeIf { it.isNotBlank() }?.let { logger.debug(it) }
+
         val docs: MutableList<DocWrapper> = Collections.synchronizedList(ArrayList<DocWrapper>())
 
         SelectedHelper.Builder()
-                .fileFilter { it.name.endsWith("java") || it.name.endsWith("kt") }
+                .fileFilter { FileType.acceptable(it.name) }
                 .classHandle {
                     actionContext!!.checkStatus()
                     classExporter!!.export(it) { doc ->
@@ -278,7 +281,9 @@ class SuvApiExporter {
 //            builder.bind(Logger::class, "delegate.logger") { it.with(ConsoleRunnerLogger::class).singleton() }
 
             builder.bind(RuleParser::class) { it.with(SuvRuleParser::class).singleton() }
+            builder.bind(RuleComputeListener::class) { it.with(RuleComputeListenerRegistry::class).singleton() }
             builder.bind(PsiClassHelper::class) { it.with(CustomizedPsiClassHelper::class).singleton() }
+
 
             builder.bind(FileApiCacheRepository::class) { it.with(DefaultFileApiCacheRepository::class).singleton() }
             builder.bind(LocalFileRepository::class, "projectCacheRepository") {
@@ -386,7 +391,9 @@ class SuvApiExporter {
             builder.bind(PostmanApiHelper::class) { it.with(PostmanCachedApiHelper::class).singleton() }
             builder.bind(HttpClientProvider::class) { it.with(ConfigurableHttpClientProvider::class).singleton() }
 
-            builder.bind(ClassExporter::class) { it.with(SpringRequestClassExporter::class).singleton() }
+            builder.bind(ClassExporter::class) { it.with(PostmanSpringRequestClassExporter::class).singleton() }
+
+            builder.bind(FormatFolderHelper::class) { it.with(PostmanFormatFolderHelper::class).singleton() }
 
             builder.bind(ConfigReader::class, "delegate_config_reader") { it.with(PostmanConfigReader::class).singleton() }
             builder.bind(ConfigReader::class) { it.with(RecommendConfigReader::class).singleton() }
@@ -402,17 +409,15 @@ class SuvApiExporter {
         override fun doExportDocs(docs: MutableList<Doc>) {
 
             try {
-                val postman = postmanFormatter!!.parseRequests(docs.filter { it is Request }
-                        .map { it as Request }
-                        .toMutableList())
+                val postman = postmanFormatter!!.parseRequests(docs.filterAs())
                 docs.clear()
                 if (postmanApiHelper!!.hasPrivateToken()) {
                     logger!!.info("PrivateToken of postman be found")
                     val createdCollection = postmanApiHelper.createCollection(postman)
 
-                    if (!createdCollection.isNullOrEmpty()) {
-                        val collectionName = createdCollection["name"]?.toString()
-                        if (StringUtils.isNotBlank(collectionName)) {
+                    if (createdCollection.notNullOrEmpty()) {
+                        val collectionName = createdCollection!!["name"]?.toString()
+                        if (collectionName.notNullOrBlank()) {
                             logger!!.info("Imported as collection:$collectionName")
                             return
                         }
@@ -432,7 +437,7 @@ class SuvApiExporter {
                 fileSaveHelper!!.saveOrCopy(GsonUtils.prettyJson(postman), {
                     logger!!.info("Exported data are copied to clipboard,you can paste to postman now")
                 }, {
-                    logger!!.info("Apis save success")
+                    logger!!.info("Apis save success: $it")
                 }) {
                     logger!!.info("Apis save failed")
                 }
@@ -476,6 +481,7 @@ class SuvApiExporter {
             builder.bindInstance("file.save.default", "api.json")
             builder.bindInstance("file.save.last.location.key", "com.itangcent.api.export.path")
 
+            builder.bind(PsiClassHelper::class) { it.with(YapiPsiClassHelper::class).singleton() }
 
         }
 
@@ -515,20 +521,19 @@ class SuvApiExporter {
 
         class SuvYapiApiExporter : AbstractYapiApiExporter() {
 
-            //cls -> CartInfo
-            private val clsCartMap: HashMap<PsiClass, CartInfo> = HashMap()
+            //privateToken+folderName -> CartInfo
+            private val folderNameCartMap: HashMap<String, CartInfo> = HashMap()
 
-            override fun getCartForCls(psiClass: PsiClass): CartInfo? {
+            @Synchronized
+            override fun getCartForDoc(folder: Folder, privateToken: String): CartInfo? {
+                var cartInfo = folderNameCartMap["$privateToken${folder.name}"]
+                if (cartInfo != null) return cartInfo
 
-                var cartId = clsCartMap[psiClass]
-                if (cartId != null) return cartId
-                synchronized(clsCartMap)
-                {
-                    cartId = clsCartMap[psiClass]
-                    if (cartId != null) return cartId
-
-                    return super.getCartForCls(psiClass)
+                cartInfo = super.getCartForDoc(folder, privateToken)
+                if (cartInfo != null) {
+                    folderNameCartMap["$privateToken${folder.name}"] = cartInfo
                 }
+                return cartInfo
             }
 
             private var tryInputTokenOfModule: HashSet<String> = HashSet()
@@ -556,12 +561,14 @@ class SuvApiExporter {
                 }
             }
 
-            private var successExportedCarts: MutableSet<String> = ContainerUtil.newConcurrentSet<String>()
+            private val successExportedCarts: MutableSet<String> = HashSet()
 
             override fun exportDoc(doc: Doc, privateToken: String, cartId: String): Boolean {
                 if (super.exportDoc(doc, privateToken, cartId)) {
-                    if (successExportedCarts.add(cartId)) {
-                        logger!!.info("Export to ${yapiApiHelper!!.getCartWeb(yapiApiHelper.getProjectIdByToken(privateToken)!!, cartId)} success")
+                    synchronized(successExportedCarts) {
+                        if (successExportedCarts.add(cartId)) {
+                            logger!!.info("Export to ${yapiApiHelper!!.getCartWeb(yapiApiHelper.getProjectIdByToken(privateToken)!!, cartId)} success")
+                        }
                     }
                     return true
                 }
@@ -577,6 +584,9 @@ class SuvApiExporter {
 
         @Inject
         private val markdownFormatter: MarkdownFormatter? = null
+
+        @Inject
+        private val settingBinder: SettingBinder? = null
 
         override fun actionName(): String {
             return "MarkdownExportAction"
@@ -607,14 +617,15 @@ class SuvApiExporter {
                     return
                 }
                 logger!!.info("Start parse apis")
-                val apiInfo = markdownFormatter!!.parseRequests(docs.toMutableList())
+                val apiInfo = markdownFormatter!!.parseRequests(docs)
                 docs.clear()
                 actionContext!!.runAsync {
                     try {
-                        fileSaveHelper!!.saveOrCopy(apiInfo, {
+                        fileSaveHelper!!.saveOrCopy(apiInfo, Charsets.forName(settingBinder!!.read().outputCharset)?.charset()
+                                ?: kotlin.text.Charsets.UTF_8, {
                             logger!!.info("Exported data are copied to clipboard,you can paste to a md file now")
                         }, {
-                            logger!!.info("Apis save success")
+                            logger!!.info("Apis save success: $it")
                         }) {
                             logger!!.info("Apis save failed")
                         }

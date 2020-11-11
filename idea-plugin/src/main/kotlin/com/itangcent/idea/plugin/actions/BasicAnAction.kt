@@ -4,6 +4,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.components.ServiceManager
 import com.intellij.openapi.project.Project
+import com.itangcent.common.spi.Setup
 import com.itangcent.idea.plugin.script.GroovyActionExtLoader
 import com.itangcent.idea.plugin.script.LoggerBuffer
 import com.itangcent.idea.plugin.settings.SettingBinder
@@ -14,9 +15,11 @@ import com.itangcent.intellij.constant.EventKey
 import com.itangcent.intellij.context.ActionContext
 import com.itangcent.intellij.extend.guice.singleton
 import com.itangcent.intellij.extend.guice.with
-import com.itangcent.intellij.jvm.SourceHelper
+import com.itangcent.intellij.jvm.kotlin.KotlinAutoInject
 import com.itangcent.intellij.logger.ConsoleRunnerLogger
 import com.itangcent.intellij.logger.Logger
+import com.itangcent.intellij.spi.IdeaAutoInject
+import com.itangcent.intellij.tip.OnlyOnceInContextTipSetup
 import javax.swing.Icon
 
 abstract class BasicAnAction : KotlinAnAction {
@@ -34,7 +37,6 @@ abstract class BasicAnAction : KotlinAnAction {
         super.onBuildActionContext(event, builder)
         builder.bindInstance("plugin.name", "easy_api")
 
-        builder.bind(SourceHelper::class) { it.with(com.itangcent.intellij.psi.SourceHelper::class) }
         builder.bind(SettingBinder::class) { it.toInstance(ServiceManager.getService(SettingBinder::class.java)) }
         builder.bind(Logger::class) { it.with(ConfigurableLogger::class).singleton() }
         builder.bind(Logger::class, "delegate.logger") { it.with(ConsoleRunnerLogger::class).singleton() }
@@ -71,5 +73,14 @@ abstract class BasicAnAction : KotlinAnAction {
         val loadActionExt = actionExtLoader.loadActionExt(event, actionName, logger)
                 ?: return
         loadActionExt.init(builder)
+    }
+
+    companion object {
+        init {
+            Setup.load(ApiExportAction::class.java.classLoader)
+            Setup.setup(OnlyOnceInContextTipSetup::class)
+            Setup.setup(IdeaAutoInject::class)
+            Setup.setup(KotlinAutoInject::class)
+        }
     }
 }

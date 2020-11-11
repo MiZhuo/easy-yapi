@@ -1,11 +1,25 @@
 package com.itangcent.common.model
 
+import com.itangcent.common.constant.HttpMethod
+import com.itangcent.common.utils.firstOrNull
+
+/**
+ * Request represent A Http API.
+ */
 open class Request : Doc() {
 
-    var path: String? = null
+    var path: URL? = null
 
+    /**
+     * The HTTP method.
+     *
+     * @see HttpMethod
+     */
     var method: String? = null
 
+    /**
+     * All of the headers.
+     */
     var headers: MutableList<Header>? = null
 
     var paths: MutableList<PathParam>? = null
@@ -21,18 +35,43 @@ open class Request : Doc() {
 
     var body: Any? = null
 
+    /**
+     * The description of [body] if it is present.
+     */
+    var bodyAttr: String? = null
+
     var response: MutableList<Response>? = null
 }
 
 fun Request.getContentType(): String? {
+    return this.header("content-type")
+}
+
+fun Request.hasForm(): Boolean {
+    if (this.method == "GET" || this.method == "ALL") {
+        return false
+    }
+
+    val contentType = this.getContentType() ?: return false
+    return !contentType.contains("application/json")
+}
+
+fun Request.header(name: String): String? {
     if (this.headers.isNullOrEmpty()) {
         return null
     }
-    return this.headers!!.filter { it.name?.toLowerCase() == "content-type" }
+    val lowerName = name.toLowerCase()
+    return this.headers!!
+            .stream()
+            .filter { it.name?.toLowerCase() == lowerName }
             .map { it.value }
             .firstOrNull()
 }
 
-fun Request.hasBody(): Boolean {
-    return this.method != null && this.method != "GET"
+fun Request.hasBodyOrForm(): Boolean {
+    return this.method != null && this.method != HttpMethod.GET
+}
+
+fun Request.hasMethod(): Boolean {
+    return this.method != null && this.method != HttpMethod.NO_METHOD
 }

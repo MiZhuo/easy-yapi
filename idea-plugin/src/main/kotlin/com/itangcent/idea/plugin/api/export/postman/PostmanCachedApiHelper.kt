@@ -1,6 +1,7 @@
 package com.itangcent.idea.plugin.api.export.postman
 
 import com.google.inject.Inject
+import com.itangcent.common.utils.notNullOrEmpty
 import com.itangcent.idea.binder.DbBeanBinderFactory
 import com.itangcent.intellij.file.LocalFileRepository
 import com.itangcent.intellij.logger.Logger
@@ -68,7 +69,7 @@ class PostmanCachedApiHelper : DefaultPostmanApiHelper() {
             val cacheOfAllCollection = allCollectionBeanBinder.read()
             if (cacheOfAllCollection != NULL_COLLECTION_INFO_CACHE) {
                 if (cacheOfAllCollection.allCollection != null) {
-                    val collectionInAllCollectionCache = cacheOfAllCollection.allCollection!!.filter { it["id"] == collectionId }.firstOrNull()
+                    val collectionInAllCollectionCache = cacheOfAllCollection.allCollection!!.firstOrNull { it["id"] == collectionId }
                     if (collectionInAllCollectionCache != null) {
                         val info = collectionInfo["info"] as MutableMap<String, Any?>
                         //check collection name
@@ -146,7 +147,7 @@ class PostmanCachedApiHelper : DefaultPostmanApiHelper() {
             val oldCollectionCache = beanBinder.read()
 
             if (oldCollectionCache != NULL_COLLECTION_INFO_CACHE
-                    && !oldCollectionCache.allCollection.isNullOrEmpty()) {
+                    && oldCollectionCache.allCollection.notNullOrEmpty()) {
                 val survivedCollectionIds = allCollection.stream()
                         .map { it["id"] }
                         .filter { it != null }

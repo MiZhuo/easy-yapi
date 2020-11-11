@@ -1,17 +1,20 @@
 package com.itangcent.idea.plugin.api.export.yapi
 
 import com.google.gson.JsonElement
+import com.google.gson.JsonNull
+import com.google.gson.JsonObject
 import com.google.inject.Inject
+import com.itangcent.common.logger.traceError
 import com.itangcent.common.utils.GsonUtils
 import com.itangcent.idea.plugin.api.export.ReservedResponseHandle
 import com.itangcent.idea.plugin.api.export.StringResponseHandler
+import com.itangcent.idea.plugin.api.export.reserved
 import com.itangcent.idea.plugin.settings.SettingBinder
 import com.itangcent.intellij.config.ConfigReader
+import com.itangcent.intellij.extend.sub
 import com.itangcent.intellij.logger.Logger
-import com.itangcent.intellij.logger.traceError
 import com.itangcent.suv.http.HttpClientProvider
 import org.apache.commons.lang3.StringUtils
-import org.apache.http.client.methods.HttpGet
 import java.io.ByteArrayOutputStream
 import java.net.SocketException
 import java.net.SocketTimeoutException
@@ -21,7 +24,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.collections.HashMap
 import kotlin.concurrent.withLock
 
-open class AbstractYapiApiHelper {
+abstract class AbstractYapiApiHelper : YapiApiHelper {
     @Inject
     private val settingBinder: SettingBinder? = null
 
@@ -43,11 +46,11 @@ open class AbstractYapiApiHelper {
 
     protected var cacheLock: ReadWriteLock = ReentrantReadWriteLock()
 
-    fun hasPrivateToken(module: String): Boolean {
+    open fun hasPrivateToken(module: String): Boolean {
         return getPrivateToken(module) != null
     }
 
-    fun findServer(): String? {
+    override fun findServer(): String? {
         if (!server.isNullOrBlank()) return server
         server = configReader!!.first("server")?.trim()?.removeSuffix("/")
         if (!server.isNullOrBlank()) return server
@@ -55,7 +58,7 @@ open class AbstractYapiApiHelper {
         return server
     }
 
-    fun setYapiServer(yapiServer: String) {
+    override fun setYapiServer(yapiServer: String) {
         val settings = settingBinder!!.read()
         settings.yapiServer = yapiServer
         settingBinder.save(settings)
@@ -63,19 +66,18 @@ open class AbstractYapiApiHelper {
         server = yapiServer.removeSuffix("/")
     }
 
-    fun getProjectWeb(module: String): String? {
+    open fun getProjectWeb(module: String): String? {
         val token = getPrivateToken(module)
         val projectId = getProjectIdByToken(token!!) ?: return null
         return "$server/project/$projectId/interface/api"
     }
 
-    protected fun findErrorMsg(res: String?): String? {
+    open protected fun findErrorMsg(res: String?): String? {
         if (res == null) return "no response"
         if (StringUtils.isNotBlank(res) && res.contains("errmsg")) {
             val returnObj = GsonUtils.parseToJsonTree(res)
             val errMsg = returnObj
-                    ?.asJsonObject
-                    ?.get("errmsg")
+                    .sub("errmsg")
                     ?.asString
             if (StringUtils.isNotBlank(errMsg) && !errMsg!!.contains("成功")) {
                 return errMsg
@@ -84,14 +86,13 @@ open class AbstractYapiApiHelper {
         return null
     }
 
-    open fun getProjectIdByToken(token: String): String? {
+    override fun getProjectIdByToken(token: String): String? {
         var projectId = cacheLock.readLock().withLock { projectIdCache[token] }
         if (projectId != null) return projectId
         try {
-            projectId = getProjectInfo(token, null)?.asJsonObject
-                    ?.get("data")
-                    ?.asJsonObject
-                    ?.get("_id")
+            projectId = getProjectInfo(token, null)
+                    ?.sub("data")
+                    ?.sub("_id")
                     ?.asString
         } catch (e: IllegalStateException) {
             logger!!.error("invalid token:$token")
@@ -104,32 +105,53 @@ open class AbstractYapiApiHelper {
         return projectId
     }
 
-    fun getProjectInfo(token: String, projectId: String?): JsonElement? {
+    override fun getProjectInfo(token: String, projectId: String?): JsonElement? {
         if (projectId != null) {
             val cachedProjectInfo = cacheLock.readLock().withLock { projectInfoCache[projectId] }
-            if (cachedProjectInfo != null) return cachedProjectInfo
+            if (cachedProjectInfo != null) {
+                if (cachedProjectInfo == NULL_PROJECT) {
+                    return null
+                }
+                return cachedProjectInfo
+            }
         }
 
-        var url = "$server$GETPROJECT?token=$token"
+        var url = "$server$GET_PROJECT_URL?token=$token"
         if (projectId != null) {
             url = "$url&id=$projectId"
         }
 
         val ret = getByApi(url, false) ?: return null
-        val projectInfo = GsonUtils.parseToJsonTree(ret)
+        var projectInfo: JsonObject? = null
+        try {
+            projectInfo = GsonUtils.parseToJsonTree(ret) as? JsonObject
+        } catch (e: Exception) {
+            logger!!.error("error to parse project [$projectId] info:$ret")
+        }
+
         if (projectId != null && projectInfo != null) {
-            cacheLock.writeLock().withLock { projectInfoCache[projectId] = projectInfo }
+            if (projectInfo.has("errcode")) {
+                if (projectInfo.get("errcode").asInt == 40011) {
+                    logger!!.warn("project:$projectId may be deleted.")
+                    cacheLock.writeLock().withLock { projectInfoCache[projectId] = NULL_PROJECT }
+                    return null
+                }
+            }
         }
         return projectInfo
     }
 
-    fun getByApi(url: String, dumb: Boolean = true): String? {
-        return try {
-            val httpClient = httpClientProvide!!.getHttpClient()
-            val httpGet = HttpGet(url)
-            val responseHandler = reservedResponseHandle()
+    override fun getProjectInfo(token: String): JsonObject? {
+        val projectId = getProjectIdByToken(token) ?: return null
+        return getProjectInfo(token, projectId) as? JsonObject ?: return null
+    }
 
-            httpClient.execute(httpGet, responseHandler).result()
+    open fun getByApi(url: String, dumb: Boolean = true): String? {
+        return try {
+            httpClientProvide!!.getHttpClient()
+                    .get(url)
+                    .call()
+                    .string()
         } catch (e: SocketTimeoutException) {
             if (!dumb) {
                 logger!!.trace("$url connect timeout")
@@ -155,16 +177,29 @@ open class AbstractYapiApiHelper {
     }
 
     protected fun reservedResponseHandle(): ReservedResponseHandle<String> {
-        return responseHandler
+        return StringResponseHandler.DEFAULT_RESPONSE_HANDLER.reserved()
     }
 
-    private var tokenMap: HashMap<String, String>? = null
+    /**
+     * Tokens in setting.
+     * Map<module,<token,state>>
+     * state: null->no_checked, true->valid, false->invalid
+     */
+    private var tokenMap: HashMap<String, Pair<String, Boolean?>>? = null
 
-    fun getPrivateToken(module: String): String? {
+    override fun getPrivateToken(module: String): String? {
 
         cacheLock.readLock().withLock {
             if (tokenMap != null) {
-                return tokenMap!![module]
+                val token = tokenMap!![module] ?: return null
+                when (token.second) {
+                    true -> {
+                        return token.first
+                    }
+                    false -> {
+                        return null
+                    }
+                }
             }
         }
 
@@ -172,7 +207,14 @@ open class AbstractYapiApiHelper {
             if (tokenMap == null) {
                 initToken()
             }
-            return tokenMap!![module]
+            val token = tokenMap!![module] ?: return null
+            return if (getProjectInfo(token.first) == null) {
+                tokenMap!![module] = token.first to false
+                null
+            } else {
+                tokenMap!![module] = token.first to true
+                token.first
+            }
         }
     }
 
@@ -182,7 +224,7 @@ open class AbstractYapiApiHelper {
         if (settings.yapiTokens != null) {
             val properties = Properties()
             properties.load(settings.yapiTokens!!.byteInputStream())
-            properties.forEach { t, u -> tokenMap!![t.toString()] = u.toString() }
+            properties.forEach { t, u -> tokenMap!![t.toString()] = u.toString() to null }
         }
     }
 
@@ -205,24 +247,23 @@ open class AbstractYapiApiHelper {
             } else {
                 tokenMap!!.clear()
             }
-            properties.forEach { t, u -> tokenMap!![t.toString()] = u.toString() }
+            properties.forEach { t, u -> tokenMap!![t.toString()] = u.toString() to null }
         }
     }
 
-    fun setToken(module: String, token: String) {
+    override fun setToken(module: String, token: String) {
         updateTokens { properties ->
             properties[module] = token
         }
     }
 
-    fun removeTokenByModule(module: String) {
+    override fun removeTokenByModule(module: String) {
         updateTokens { properties ->
             properties.remove(module)
         }
     }
 
-    fun removeToken(token: String) {
-
+    override fun removeToken(token: String) {
         updateTokens { properties ->
             val removedKeys = properties.entries
                     .filter { it.value == token }
@@ -232,16 +273,15 @@ open class AbstractYapiApiHelper {
         }
     }
 
-    fun readTokens(): HashMap<String, String> {
+    override fun readTokens(): HashMap<String, String> {
         if (tokenMap == null) {
             initToken()
         }
-        return tokenMap!!
+        return HashMap(tokenMap!!.mapValues { it.value.first })
     }
 
     companion object {
-        var GETPROJECT = "/api/project/get"
-
-        private val responseHandler = ReservedResponseHandle(StringResponseHandler())
+        const val GET_PROJECT_URL = "/api/project/get"
+        val NULL_PROJECT: JsonElement = JsonNull.INSTANCE
     }
 }
